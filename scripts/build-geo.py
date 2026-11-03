@@ -156,6 +156,25 @@ def main():
                     if npoly == 0:
                         continue
 
+                    # 部分数据源（台湾）缺 cp 字段 → 用外环质心兜底，不丢数据
+                    if not cp:
+                        ar = 0.0
+                        cx = 0.0
+                        cy = 0.0
+                        for poly in polys:
+                            ring = poly[0] if poly else None
+                            if not ring or len(ring) < 3:
+                                continue
+                            for i in range(len(ring)):
+                                x1, y1 = ring[i][0], ring[i][1]
+                                x2, y2 = ring[(i + 1) % len(ring)][0], ring[(i + 1) % len(ring)][1]
+                                cr = x1 * y2 - x2 * y1
+                                ar += cr
+                                cx += (x1 + x2) * cr
+                                cy += (y1 + y2) * cr
+                        if abs(ar) > 1e-12:
+                            cp = [cx / (3 * ar), cy / (3 * ar)]
+
                     idx.append({
                         'n': name,
                         'c': cname,                     # 所属地级市（真实层级，非聚类）

@@ -1,5 +1,5 @@
 import meta from '../data/provinces.json';
-import { project } from './geo';
+import { project } from './project';
 
 // ============================================================
 //  全国地理数据流式加载器
@@ -15,6 +15,7 @@ import { project } from './geo';
 
 export interface CountyMeta {
   n: string;                 // 区县名
+  c: string;                 // 所属地级市（真实行政层级）
   cp: [number, number] | null; // 中心点 [lon, lat]
   p: number;                 // 多边形数
   o: number;                 // 字节偏移
@@ -37,7 +38,8 @@ export interface ProvinceGeo {
   counties: { meta: CountyMeta; polys: [number, number][][][] }[];
 }
 
-export const GEO_META = meta as {
+// JSON 导入的 cp 被推断为 number[]，这里显式收敛到元组类型
+export const GEO_META = meta as unknown as {
   version: number;
   quant: number;
   tol: number;

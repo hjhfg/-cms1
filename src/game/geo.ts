@@ -1,24 +1,8 @@
 import { PROVINCES, QUANT, type ProvinceMeta } from './geoLoader';
+import { project, unproject, R_EARTH, LON0, LAT0 } from './project';
 
-// 正弦投影：1 单位 = 1 公里（真实 1:1 比例）
-export const R_EARTH = 6371.0088;
-export const LON0 = 105.0;   // 全国视野中心（东经 105°，覆盖中国 + 东南亚北部）
-export const LAT0 = 30.0;
-const D2R = Math.PI / 180;
-
-export function project(lon: number, lat: number): [number, number] {
-  const phi = lat * D2R;
-  const x = R_EARTH * (lon - LON0) * D2R * Math.cos(phi);
-  const z = -R_EARTH * (lat - LAT0) * D2R;
-  return [x, z];
-}
-
-export function unproject(x: number, z: number): [number, number] {
-  const lat = LAT0 - z / (R_EARTH * D2R);
-  const phi = lat * D2R;
-  const lon = LON0 + x / (R_EARTH * D2R * Math.cos(phi));
-  return [lon, lat];
-}
+// 投影实现见 project.ts（独立模块，避免循环依赖）
+export { project, unproject, R_EARTH, LON0, LAT0 };
 
 export interface RegionGeo {
   id: string;

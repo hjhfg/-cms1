@@ -87,6 +87,8 @@ export class World {
   // ---- 流式加载状态 ----
   /** 正在加载的省份 */
   loadingProvinces = new Set<string>();
+  /** 视野内但尚未发起请求的省份队列 */
+  landPending = new Set<string>();
   /** 已构建几何的省份（与小面几何一一对应） */
   builtProvinces = new Set<string>();
   /** 上次触发加载的视野中心，用于节流 */
@@ -525,12 +527,17 @@ export class World {
 
     const coast: [number, number, number, number][] = [];
     const border: [number, number, number, number][] = [];
+    // 抽稀：全国尺度下 1 像素约 5~10 km，逐边生成 ribbon 会爆量。
+    // 按相机距离决定采样的最小边长（公里）。
+    const minSeg = this.curDist > 3000 ? 14 : this.curDist > 800 ? 6 : 1.2;
     for (const pg of loadedProvinces()) {
       for (const c of pg.counties) {
         for (const poly of c.polys) {
           // 只取外环做边界（内环是飞地/湖泊，另行处理会过密）
           const ring = poly[0];
           if (!ring) continue;
+          // 累积跳点，保证粗采样时也不丢整体形状
+          let acc = 0;
           for (let i = 0; i < ring.length; i++) {
             const a = ring[i];
             const b = ring[(i + 1) % ring.length];
@@ -541,6 +548,9 @@ export class World {
             const l = Math.hypot(dx, dz) || 1;
             dx /= l;
             dz /= l;
+            acc += l;
+            if (l < 1e-6 || acc < minSeg) continue;
+            acc = 0;
             const s1 = isLand(mx - dz * 1.6, mz + dx * 1.6);
             const s2 = isLand(mx + dz * 1.6, mz - dx * 1.6);
             (s1 && s2 ? border : coast).push([a[0], a[1], b[0], b[1]]);
@@ -581,7 +591,8 @@ export class World {
     // 视野半径：随镜头距离变化，留 1.5 倍缓冲
     const viewR = Math.max(900, dist * 2.2);
     const key = Math.round(tx / 120) + ',' + Math.round(tz / 120) + ',' + Math.round(viewR / 240);
-    if (key === this.landSyncKey) return;
+    // 注意：有省份正在加载时必须继续派发，否则并发上限会永久卡住剩余省份
+    if (key === this.landSyncKey && this.loadingProvinces.size === 0 && this.landPending.size === 0) return;
     this.landSyncKey = key;
 
     const want = provincesInView(tx - viewR, tz - viewR, tx + viewR, tz + viewR);
@@ -599,10 +610,21 @@ export class World {
       this.builtProvinces.delete(id);
     }
 
-    // ---- 发起加载 ----
-    let inflight = this.loadingProvinces.size;
+    // ---- 更新待加载队列 ----
     for (const id of want) {
-      if (isLoaded(id) || this.loadingProvinces.has(id) || inflight >= 3) continue;
+      if (!isLoaded(id) && !this.loadingProvinces.has(id)) this.landPending.add(id);
+    }
+    for (const id of [...this.landPending]) {
+      if (!wantSet.has(id) || isLoaded(id)) this.landPending.delete(id);
+    }
+
+    // ---- 发起加载（并发上限 4） ----
+    let inflight = this.loadingProvinces.size;
+    const queue = [...this.landPending];
+    for (const id of queue) {
+      if (inflight >= 4) break;
+      if (isLoaded(id) || this.loadingProvinces.has(id)) { this.landPending.delete(id); continue; }
+      this.landPending.delete(id);
       this.loadingProvinces.add(id);
       inflight++;
       this.landStats.requests++;
@@ -610,6 +632,9 @@ export class World {
         .then(() => {
           this.loadingProvinces.delete(id);
           this.buildProvinceLand(id);
+          // 统计实时更新：syncLand 有节流提前返回，不能依赖它刷新
+          this.landStats.loaded = loadedProvinces().length;
+          this.landStats.built = this.builtProvinces.size;
         })
         .catch((e) => {
           this.loadingProvinces.delete(id);
@@ -627,6 +652,9 @@ export class World {
     const pg = loadedProvinces().find((p) => p.id === id);
     if (!pg) return;
 
+    // 用 ShapeGeometry 而非 ExtrudeGeometry：
+    // 陆地下方就是海，侧墙永远看不到，却要多花 3~4 倍顶点。
+    // 实测全国挤出后 1600 万顶点 → ShapeGeometry 只需约 140 万。
     const geos: THREE.BufferGeometry[] = [];
     for (const c of pg.counties) {
       for (const poly of c.polys) {
@@ -636,9 +664,8 @@ export class World {
           for (let i = 1; i < poly.length; i++) {
             shape.holes.push(new THREE.Path(poly[i].map(([x, z]) => new THREE.Vector2(x, -z))));
           }
-          const g = new THREE.ExtrudeGeometry(shape, { depth: 2, bevelEnabled: false, curveSegments: 1 });
+          const g = new THREE.ShapeGeometry(shape, 1);
           g.rotateX(-Math.PI / 2);
-          g.translate(0, -2, 0);
           geos.push(g);
         } catch {
           /* 退化多边形忽略 */
@@ -679,6 +706,11 @@ export class World {
     if (!this.maskDirty) return;
     this.maskTimer -= dt;
     if (this.maskTimer > 0) return;
+    // 只要还有省份在加载，就保持 dirty，几何齐了再收尾
+    if (this.loadingProvinces.size > 0 || this.landPending.size > 0) {
+      this.maskTimer = 0.35;
+      return;
+    }
     this.maskTimer = 1.2;
     this.maskDirty = false;
     const built = [...this.builtProvinces]
@@ -742,21 +774,23 @@ export class World {
       e.n++;
       waitByCity.set(s.cityId, e);
     }
+    // regionMats 的 key 是「省级 ID」，而 CITIES 是地级市 —— 两者不是同一层级，
+    // 不能直接 find。查不到时用省级配色兜底。
     for (const [id, mat] of this.regionMats) {
-      const city = g.cities.find((c) => c.id === id)!;
-      const base = new THREE.Color(city.color);
+      const city = g.cities.find((c) => c.id === id);
+      const base = new THREE.Color(city?.color ?? PROV_COLOR.get(id) ?? '#7a8288');
       const c = this.tmpC;
       if (this.mode === 'political') {
         c.copy(base);
-        if (!city.unlocked) c.lerp(new THREE.Color(0x7a7d80), 0.72).multiplyScalar(0.78);
+        if (city && !city.unlocked) c.lerp(new THREE.Color(0x7a7d80), 0.72).multiplyScalar(0.78);
       } else if (this.mode === 'terrain') {
         let h = 0;
         for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 97;
         c.setHSL(0.22 + (h % 7) * 0.012, 0.32, 0.36 + (h % 5) * 0.015);
-        if (!city.unlocked) c.multiplyScalar(0.72);
+        if (city && !city.unlocked) c.multiplyScalar(0.72);
       } else {
         const e = waitByCity.get(id);
-        if (!city.unlocked || !e) c.set(0x555a60);
+        if (!city || !city.unlocked || !e) c.set(0x555a60);
         else {
           const v = Math.min(1, e.w / (e.n * 8));
           c.set(0x2f7f9a).lerp(new THREE.Color(0xf2c14e), Math.min(1, v * 2)).lerp(new THREE.Color(0xe0352b), Math.max(0, v * 2 - 1));
