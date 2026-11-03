@@ -21,8 +21,8 @@ export interface CityDef {
   startUnlocked?: boolean;
 }
 
-// 起始只开放佛山，其余靠解锁（迷你地铁的节奏）
-const START_UNLOCKED = new Set(['440600']);
+// 起始只开放佛山（按市名匹配：生成时 ID 会重新编号，硬编码 ID 会失效）
+const START_CITY_NAMES = new Set(['佛山市']);
 
 export const CITIES: CityDef[] = [
   { id: '530001', name: '临沧市', short: '临沧', color: '#8a8f96', province: '530000',
@@ -4456,7 +4456,7 @@ export const CITIES: CityDef[] = [
 ];
 
 // 起始解锁（迷你地铁逻辑：开局只给一座城市）
-for (const c of CITIES) if (START_UNLOCKED.has(c.id)) c.startUnlocked = true;
+for (const c of CITIES) if (START_CITY_NAMES.has(c.name)) c.startUnlocked = true;
 
 export const LINE_COLORS = ['#e53935', '#1e88e5', '#fdd835', '#43a047', '#8e24aa', '#fb8c00', '#00acc1', '#ec407a'];
 export const LINE_NAMES = ['1号线', '2号线', '3号线', '4号线', '5号线', '6号线', '7号线', '8号线'];

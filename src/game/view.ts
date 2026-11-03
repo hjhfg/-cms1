@@ -8,6 +8,8 @@ import type { Game, Line } from './engine';
 import { regionAt } from './geo';
 import { makeIconAtlas, ICON, ICON_COLS } from './models';
 import { pathAt, type PathSample } from './path';
+import { project } from './project';
+import { CITIES } from '../data/regions';
 import { World, REGION_INFO, type MapMode, type Quality } from './world';
 import type { Shape } from '../data/regions';
 
@@ -183,14 +185,25 @@ export class GameView {
   }
 
   focusProvince() {
-    // 全国视野：中国 + 越南北部，约 5000 × 4800 km
+    // 开局视野：聚焦起始城市（佛山）所在的珠三角。
+    // 全国地图是「可探索范围」，不是开场视角 —— 一上来拉到全国尺度，
+    // 站点、高架、站棚全被压成一个点，原版的细节全看不见。
+    const start = CITIES.find((c) => c.startUnlocked);
+    const st = start?.stations?.[0];
+    let fx = 0;
+    let fz = 0;
+    if (st) {
+      const [x, z] = project(st.lon, st.lat);
+      fx = x;
+      fz = z;
+    }
     const aspect = this.W / this.H;
-    const d = Math.min(MAX_DIST, Math.max(5200 / (0.69 * aspect), 4600 / 0.69) * 0.95);
+    // 约 55 km 视野高度：能看清站棚拱肋、高架箱梁与桥下路网
+    const d = Math.max(28, Math.min(MAX_DIST, Math.max(70 / (0.69 * aspect), 55 / 0.69) * 0.95));
     this.follow = null;
     this.pitch = 1.0;
     this.yaw = 0;
-    // 投影原点即全国几何中心，直接对准原点
-    this.flyTo(0, 0, d);
+    this.flyTo(fx, fz, d);
   }
 
   flyTo(x: number, z: number, dist: number) {
@@ -520,19 +533,28 @@ export class GameView {
     const dist = this.dist;
     const pw = this.pxWorld;
 
-    // --- 区域名称（P 社大战略风格：按区域尺寸缩放的间隔大字） ---
+    // --- 区域名称（P 社大战略风格） ---
+    // 关键：字号必须由「屏幕上的实际宽度」反推，且上限收紧。
+    // 原来上限 54px 且按世界尺寸算，全国视野下每个省名都顶到最大字号，
+    // 直接把地图糊满——这是"乱七八糟"观感的主要来源。
     g.textAlign = 'center';
     g.textBaseline = 'middle';
+    const labelScale = Math.max(0.35, Math.min(1, 220 / Math.max(1, dist)));
     for (const r of REGION_INFO) {
       const chars = r.short.length;
-      let fs = Math.min(54, (r.size * 0.62) / pw / Math.max(2, chars));
-      if (fs < 11) continue;
+      // r.size 是世界公里；pw 是每像素多少公里 → 屏幕宽度
+      const screenW = (r.size * 0.62) / pw;
+      let fs = (screenW / Math.max(2, chars)) * labelScale;
+      fs = Math.min(fs, 40);
+      if (fs < 10) continue;
+      // 视野离开该省太远就不画标签
+      if (Math.abs(r.x - this.tx) > dist * 3 || Math.abs(r.z - this.tz) > dist * 3) continue;
       const alphaFar = Math.min(1, (fs - 11) / 8);
       const p = this.proj(r.x, 0, r.z);
       if (!p.ok || p.x < -100 || p.x > this.W + 100 || p.y < -50 || p.y > this.H + 50) continue;
       const city = game.cities.find((c) => c.id === r.id);
       const locked = city && !city.unlocked;
-      fs = Math.max(12, fs);
+      fs = Math.max(11, fs);
       g.font = `700 ${fs}px "Songti SC","Noto Serif CJK SC","STSong","SimSun",serif`;
       const sp = fs * 0.35;
       const total = chars * fs + (chars - 1) * sp;
