@@ -1,5 +1,7 @@
 import map from '../data/map.json';
 import { RIVERS } from '../data/rivers';
+import { DELTA_RIVERS } from '../data/delta';
+import { LAKES } from '../data/lakes';
 
 // 正弦投影：1 单位 = 1 公里（真实 1:1 比例）
 export const R_EARTH = 6371.0088;
@@ -101,6 +103,43 @@ function pointInRing(x: number, z: number, ring: [number, number][]) {
   return inside;
 }
 
+export function lakeAt(x: number, z: number): ProjectedLake | null {
+  for (const l of PROJECTED_LAKES) {
+    if (x < l.minX || x > l.maxX || z < l.minZ || z > l.maxZ) continue;
+    if (pointInRing(x, z, l.pts)) return l;
+  }
+  return null;
+}
+
+const nearCache = new Map<number, boolean>();
+const NEAR_STEP = 0.5;
+/** 附近 r 公里内是否有陆地（用来区分“狭窄潮汐河道”和“开阔海面”） */
+export function nearLand(x: number, z: number, r: number): boolean {
+  const key = Math.round(x / NEAR_STEP) * 100003 + Math.round(z / NEAR_STEP) * 7 + Math.round(r * 10);
+  const hit = nearCache.get(key);
+  if (hit !== undefined) return hit;
+  let res = false;
+  const dr = Math.max(0.35, r / 4);
+  for (let rad = dr; rad <= r + 1e-6 && !res; rad += dr) {
+    for (let k = 0; k < 6; k++) {
+      const a = (k * Math.PI) / 3;
+      if (isLand(x + Math.cos(a) * rad, z + Math.sin(a) * rad)) {
+        res = true;
+        break;
+      }
+    }
+  }
+  if (nearCache.size > 400000) nearCache.clear();
+  nearCache.set(key, res);
+  return res;
+}
+
+/** 是否落在水面（海 / 江 / 河 / 湖）——用于岸堤避让 */
+export function isWater(x: number, z: number): boolean {
+  if (!isLand(x, z)) return true;
+  return !!riverAt(x, z) || !!lakeAt(x, z);
+}
+
 function isLandMath(x: number, z: number) {
   for (const b of REGION_BOX) {
     if (x < b.minX || x > b.maxX || z < b.minZ || z > b.maxZ) continue;
@@ -153,7 +192,7 @@ export interface ProjectedRiver {
   pts: [number, number][];
 }
 
-export const PROJECTED_RIVERS: ProjectedRiver[] = RIVERS.map((r) => ({
+export const PROJECTED_RIVERS: ProjectedRiver[] = [...RIVERS, ...DELTA_RIVERS].map((r) => ({
   name: r.name,
   cls: r.cls,
   w: r.w,
@@ -216,11 +255,29 @@ export function riverAt(x: number, z: number): ProjectedRiver | null {
   return best;
 }
 
-export type WaterKind = 'none' | 'river' | 'jiang' | 'sea';
+// ---------- 湖泊 ----------------
+export interface ProjectedLake {
+  name: string;
+  pts: [number, number][];
+  minX: number;
+  maxX: number;
+  minZ: number;
+  maxZ: number;
+}
+
+export const PROJECTED_LAKES: ProjectedLake[] = LAKES.map((l) => {
+  const pts = l.pts.map(([lon, lat]) => project(lon, lat)) as [number, number][];
+  const xs = pts.map((p) => p[0]);
+  const zs = pts.map((p) => p[1]);
+  return { name: l.name, pts, minX: Math.min(...xs), maxX: Math.max(...xs), minZ: Math.min(...zs), maxZ: Math.max(...zs) };
+});
+
+export type WaterKind = 'none' | 'river' | 'jiang' | 'lake' | 'sea';
 
 export interface WaterProfile {
   river: number; // km
   jiang: number; // km
+  lake: number; // km
   sea: number; // km
   from: number; // 首个水面采样点的比例位置
   to: number; // 最后一个水面采样点的比例位置
@@ -233,6 +290,7 @@ export function waterProfile(ax: number, az: number, bx: number, bz: number): Wa
   const n = Math.max(4, Math.ceil(len / 0.7));
   let river = 0;
   let jiang = 0;
+  let lake = 0;
   let sea = 0;
   let from = 1;
   let to = 0;
@@ -242,6 +300,7 @@ export function waterProfile(ax: number, az: number, bx: number, bz: number): Wa
     const z = az + (bz - az) * t;
     let kind: WaterKind = 'none';
     if (!isLand(x, z)) kind = 'sea';
+    else if (lakeAt(x, z)) kind = 'lake';
     else {
       const r = riverAt(x, z);
       if (r) kind = r.cls === 2 ? 'jiang' : 'river';
@@ -250,6 +309,7 @@ export function waterProfile(ax: number, az: number, bx: number, bz: number): Wa
     const seg = len / n;
     if (kind === 'river') river += seg;
     else if (kind === 'jiang') jiang += seg;
+    else if (kind === 'lake') lake += seg;
     else sea += seg;
     if (t < from) from = t;
     if (t > to) to = t;
@@ -258,9 +318,9 @@ export function waterProfile(ax: number, az: number, bx: number, bz: number): Wa
     from = 0;
     to = 0;
   }
-  const kind: WaterKind =
-    sea >= Math.max(river, jiang) && sea > 0 ? 'sea' : jiang >= river && jiang > 0 ? 'jiang' : river > 0 ? 'river' : 'none';
-  return { river, jiang, sea, from, to, kind };
+  const best = Math.max(sea, lake, jiang, river);
+  const kind: WaterKind = best <= 0 ? 'none' : sea === best ? 'sea' : lake === best ? 'lake' : jiang === best ? 'jiang' : 'river';
+  return { river, jiang, lake, sea, from, to, kind };
 }
 
 export function landingPoint(x0: number, z0: number, x1: number, z1: number): [number, number] {

@@ -3,7 +3,8 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { CITY_META } from '../data/cities';
 import type { BridgeInfo, Game, Line, Station, Train } from './engine';
 import type { PathData } from './path';
-import { PROJECTED_RIVERS, REGIONS, isLand } from './geo';
+import { BOUNDS, REGIONS, isLand, isWater } from './geo';
+import { buildWater, toGeometry } from './water';
 import { buildRibbonGeometry, buildSegmentRibbon, makeRibbonUniforms, makeScreenRibbonMaterial, patchRibbonMaterial, type RibbonUniforms, type ScreenRibbonUniforms } from './ribbon';
 import { buildCarGeoms, makeBallastTexture, makeFacadeTextures, makeNoiseTexture, makeWaterNormal, type CarGeoms } from './models';
 import { pathAt, type PathSample } from './path';
@@ -121,6 +122,7 @@ export class World {
   shadowSize = 1;
   time = 0;
   private riverWaterMats: THREE.MeshPhysicalMaterial[] = [];
+  private shelf: THREE.Mesh | null = null;
   private builtStations = new Set<number>();
   curDist = 100;
   neutralLand = new THREE.Color(0x77805f);
@@ -176,8 +178,8 @@ export class World {
     const seaTile = 2.4;
     this.waterNormal.repeat.set(9000 / seaTile, 9000 / seaTile);
     this.seaMat = new THREE.MeshPhysicalMaterial({
-      color: 0x14506b, roughness: 0.16, metalness: 0.0, normalMap: this.waterNormal, normalScale: new THREE.Vector2(0.55, 0.55),
-      envMapIntensity: 0.55, clearcoat: 0.25, clearcoatRoughness: 0.2,
+      color: 0x14506b, roughness: 0.08, metalness: 0.0, normalMap: this.waterNormal, normalScale: new THREE.Vector2(0.7, 0.7),
+      envMapIntensity: 1.15, clearcoat: 1, clearcoatRoughness: 0.05,
     });
     this.sea = new THREE.Mesh(new THREE.PlaneGeometry(9000, 9000), this.seaMat);
     this.sea.rotation.x = -Math.PI / 2;
@@ -277,91 +279,98 @@ export class World {
   }
 
 
-  // ================= 河流 / 江（3D 水面） =================
-  private static ribbonAlong(pts: [number, number][], halfW: number, y: number) {
-    const samples: [number, number][] = [];
-    for (let i = 0; i < pts.length - 1; i++) {
-      const a = pts[i];
-      const b = pts[i + 1];
-      const n = Math.max(2, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / 0.3));
-      for (let k = 0; k < n; k++) {
-        const t = k / n;
-        samples.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
-      }
-    }
-    samples.push(pts[pts.length - 1]);
-    const pos: number[] = [];
-    const uv: number[] = [];
-    const idx: number[] = [];
-    let acc = 0;
-    for (let i = 0; i < samples.length; i++) {
-      const p = samples[i];
-      const pPrev = samples[Math.max(0, i - 1)];
-      const pNext = samples[Math.min(samples.length - 1, i + 1)];
-      let dx = pNext[0] - pPrev[0];
-      let dz = pNext[1] - pPrev[1];
-      const l = Math.hypot(dx, dz) || 1;
-      dx /= l;
-      dz /= l;
-      const nx = -dz * halfW;
-      const nz = dx * halfW;
-      if (i > 0) acc += Math.hypot(p[0] - samples[i - 1][0], p[1] - samples[i - 1][1]);
-      pos.push(p[0] + nx, y, p[1] + nz, p[0] - nx, y, p[1] - nz);
-      uv.push(acc / 0.55, 0, acc / 0.55, 1);
-      if (i > 0) {
-        const a0 = (i - 1) * 2;
-        idx.push(a0, a0 + 2, a0 + 1, a0 + 1, a0 + 2, a0 + 3);
-      }
-    }
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
-    g.setIndex(idx);
-    g.computeVertexNormals();
-    return g;
-  }
-
   private buildRivers() {
-    const bankGeos: THREE.BufferGeometry[] = [];
-    const waterGeos: THREE.BufferGeometry[] = [];
-    const foamGeos: THREE.BufferGeometry[] = [];
-    for (const r of PROJECTED_RIVERS) {
-      const half = r.w / 2;
-      bankGeos.push(World.ribbonAlong(r.pts, half * 1.75, 0.0008));
-      waterGeos.push(World.ribbonAlong(r.pts, half, 0.0016));
-      foamGeos.push(World.ribbonAlong(r.pts, half * 0.92, 0.0024));
-    }
-    const bankMat = new THREE.MeshStandardMaterial({ color: 0x3d4632, roughness: 1, metalness: 0, side: THREE.DoubleSide });
-    const bank = new THREE.Mesh(mergeGeometries(bankGeos, false)!, bankMat);
-    bank.receiveShadow = true;
-    bank.renderOrder = 1;
-    this.scene.add(bank);
+    const step = this.quality === 'low' ? 1.2 : 0.7;
+    const { water, bank } = buildWater(step);
+    const waterGeo = toGeometry(water);
+    const bankGeo = toGeometry(bank);
 
     const tex = this.waterNormal.clone();
     tex.needsUpdate = true;
-    tex.repeat.set(1, 1);
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(1, 1);
     const waterMat = new THREE.MeshPhysicalMaterial({
-      color: 0x1d6a86,
-      roughness: 0.09,
+      color: 0xffffff,
+      vertexColors: true,
+      roughness: 0.07,
       metalness: 0.0,
       normalMap: tex,
-      normalScale: new THREE.Vector2(0.7, 0.7),
-      envMapIntensity: 1.1,
-      clearcoat: 0.5,
-      clearcoatRoughness: 0.08,
+      normalScale: new THREE.Vector2(0.55, 0.55),
+      envMapIntensity: 1.4,
+      clearcoat: 1,
+      clearcoatRoughness: 0.05,
       side: THREE.DoubleSide,
     });
-    const water = new THREE.Mesh(mergeGeometries(waterGeos, false)!, waterMat);
-    water.renderOrder = 2;
-    water.receiveShadow = false;
-    this.scene.add(water);
+    const waterMesh = new THREE.Mesh(waterGeo, waterMat);
+    waterMesh.renderOrder = 4;
+    waterMesh.frustumCulled = false;
+    this.scene.add(waterMesh);
     this.riverWaterMats.push(waterMat);
 
-    const foamMat = new THREE.MeshBasicMaterial({ color: 0xbfe6ef, transparent: true, opacity: 0.1, side: THREE.DoubleSide, depthWrite: false });
-    const foam = new THREE.Mesh(mergeGeometries(foamGeos, false)!, foamMat);
-    foam.renderOrder = 3;
-    this.scene.add(foam);
+    const bankMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.96, metalness: 0, side: THREE.DoubleSide });
+    const bankMesh = new THREE.Mesh(bankGeo, bankMat);
+    bankMesh.renderOrder = 3;
+    bankMesh.receiveShadow = true;
+    bankMesh.frustumCulled = false;
+    this.scene.add(bankMesh);
+
+    this.buildSeaShelf();
+  }
+
+  /** 近岸浅滩：把陆地掩膜模糊成近海渐变，海面立刻有了“岸→深海”的层次 */
+  private buildSeaShelf() {
+    const S = 0.5; // px / km
+    const w = Math.max(8, Math.ceil((BOUNDS.maxX - BOUNDS.minX) * S));
+    const h = Math.max(8, Math.ceil((BOUNDS.maxZ - BOUNDS.minZ) * S));
+    const land = document.createElement('canvas');
+    land.width = w;
+    land.height = h;
+    const g = land.getContext('2d')!;
+    g.fillStyle = '#fff';
+    for (const r of REGIONS) {
+      g.beginPath();
+      for (const poly of r.polys) {
+        for (const ring of poly) {
+          ring.forEach(([x, z], k) => {
+            const px = (x - BOUNDS.minX) * S;
+            const py = (z - BOUNDS.minZ) * S;
+            if (k === 0) g.moveTo(px, py);
+            else g.lineTo(px, py);
+          });
+          g.closePath();
+        }
+      }
+      g.fill('evenodd');
+    }
+    const soft = document.createElement('canvas');
+    soft.width = w;
+    soft.height = h;
+    const g2 = soft.getContext('2d')!;
+    // 多次带模糊叠加，得到 15~30km 的浅海带
+    g2.filter = 'blur(9px)';
+    g2.drawImage(land, 0, 0);
+    g2.filter = 'none';
+
+    const tex = new THREE.CanvasTexture(soft);
+    tex.flipY = false;
+    tex.needsUpdate = true;
+    const geo = new THREE.BufferGeometry();
+    const x0 = BOUNDS.minX;
+    const x1 = BOUNDS.maxX;
+    const z0 = BOUNDS.minZ;
+    const z1 = BOUNDS.maxZ;
+    geo.setAttribute(
+      'position',
+      new THREE.Float32BufferAttribute([x0, 0, z0, x1, 0, z0, x0, 0, z1, x1, 0, z1], 3),
+    );
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute([0, 0, 1, 0, 0, 1, 1, 1], 2));
+    geo.setIndex([0, 2, 1, 1, 2, 3]);
+    const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, opacity: 0.5, depthWrite: false, color: 0x74d8e2 });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.renderOrder = -9;
+    mesh.frustumCulled = false;
+    this.scene.add(mesh);
+    this.shelf = mesh;
   }
 
   // ================= 桥梁 =================
@@ -515,7 +524,7 @@ export class World {
           if (rnd() > p * density * 0.95) continue;
           const wx = st.x + lx * cs - lz * sn;
           const wz = st.z + lx * sn + lz * cs;
-          if (!isLand(wx, wz)) continue;
+          if (!isLand(wx, wz) || isWater(wx, wz)) continue;
           const w = 0.07 + rnd() * 0.1;
           const dd = 0.07 + rnd() * 0.1;
           let h = 0.014 + Math.pow(rnd(), 2.2) * 0.035;
@@ -925,6 +934,7 @@ export class World {
 
     // 海面
     const seaY = -Math.max(0.004, dist * 0.0009);
+    if (this.shelf) this.shelf.position.y = seaY + 0.0004;
     this.sea.position.set(tx, seaY, tz);
     const fr = (v: number) => v - Math.floor(v);
     this.waterNormal.offset.set(fr(tx / 2.4 + this.time * 0.004), fr(-tz / 2.4 + this.time * 0.0027));

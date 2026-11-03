@@ -48,7 +48,7 @@ export interface Train {
   lastStation: number;
 }
 
-export type BridgeKind = 'river' | 'jiang' | 'sea';
+export type BridgeKind = 'river' | 'jiang' | 'lake' | 'sea';
 export interface BridgeInfo {
   kind: BridgeKind;
   name: string; // 跨河大桥 / 跨江大桥 / 跨海大桥
@@ -58,7 +58,7 @@ export interface BridgeInfo {
   t0: number; // 桥起点在线路参数上的比例
   t1: number;
 }
-export const BRIDGE_NAME: Record<BridgeKind, string> = { river: '跨河大桥', jiang: '跨江大桥', sea: '跨海大桥' };
+export const BRIDGE_NAME: Record<BridgeKind, string> = { river: '跨河大桥', jiang: '跨江大桥', lake: '跨湖大桥', sea: '跨海大桥' };
 
 export interface Line {
   id: number;
@@ -240,9 +240,9 @@ export class Game {
     const B = this.stations[b];
     const len = Math.hypot(A.x - B.x, A.z - B.z);
     const w = waterProfile(A.x, A.z, B.x, B.z);
-    const land = Math.max(0, len - w.river - w.jiang - w.sea);
+    const land = Math.max(0, len - w.river - w.jiang - w.lake - w.sea);
     const seaRate = 4.2 * (1 - this.techs.tbm * 0.15);
-    return Math.round(land * 0.85 + w.river * 1.7 + w.jiang * 2.6 + w.sea * seaRate);
+    return Math.round(land * 0.85 + w.river * 1.7 + w.jiang * 2.6 + w.lake * 2.2 + w.sea * seaRate);
   }
 
   /** 该段的跨水明细（桥型 / 里程 / 跨度），供造价、桥体渲染与 UI 使用 */
@@ -250,7 +250,7 @@ export class Game {
     const A = this.stations[a];
     const B = this.stations[b];
     const w = waterProfile(A.x, A.z, B.x, B.z);
-    const km = w.river + w.jiang + w.sea;
+    const km = w.river + w.jiang + w.lake + w.sea;
     if (km < 0.35) return null;
     const kind: BridgeKind = w.kind === 'none' ? 'river' : (w.kind as WaterKind as BridgeKind);
     return { kind, name: BRIDGE_NAME[kind], a, b, km, t0: w.from, t1: w.to };
@@ -485,7 +485,7 @@ export class Game {
         const bi = this.segWater(l.stations[i], l.stations[(i + 1) % n]);
         if (!bi) continue;
         bridges.push(bi);
-        arch[i] = { h: bi.kind === 'sea' ? 0.05 : bi.kind === 'jiang' ? 0.028 : 0.014, t0: bi.t0, t1: bi.t1 };
+        arch[i] = { h: bi.kind === 'sea' ? 0.05 : bi.kind === 'jiang' ? 0.028 : bi.kind === 'lake' ? 0.032 : 0.014, t0: bi.t0, t1: bi.t1 };
       }
       l.bridges = bridges;
       l.path = buildPath({ pts: l.stations.map((sid) => [this.stations[sid].x, this.stations[sid].z]), elev, lanes, loop: l.loop, arch });

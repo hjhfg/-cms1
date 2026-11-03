@@ -1,6 +1,6 @@
 import divisionsRaw from '../data/divisions.json';
 import { CITY_META } from '../data/cities';
-import { isLand, project } from './geo';
+import { isLand, isWater, project } from './geo';
 import type { Shape, StationDef } from '../data/regions';
 
 interface Div {
@@ -50,7 +50,7 @@ function jitterPoint(div: Div, rnd: () => number, spread: number): [number, numb
     const lat = div.y + (Math.sin(ang) * rad) / 111;
     const lon = div.x + (Math.cos(ang) * rad) / (111 * Math.max(0.2, Math.cos((div.y * Math.PI) / 180)));
     const [x, z] = project(lon, lat);
-    if (isLand(x, z)) return [lon, lat];
+    if (isLand(x, z) && !isWater(x, z)) return [lon, lat];
   }
   return [div.x, div.y];
 }
