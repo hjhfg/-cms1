@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Game, SHAPE_LIST, TECHS } from './game/engine';
+import { BAL, Game, SHAPE_LIST, TECHS } from './game/engine';
 import { GameView, detectQuality, type Sel } from './game/view';
 import { project } from './game/geo';
 import type { MapMode, Quality } from './game/world';
@@ -533,7 +533,7 @@ function Stat({ label, value }: { label: string; value: string }) {
 function HelpText() {
   return (
     <div className="space-y-2 text-slate-300">
-      <p><b className="text-[#f1dba0]">目标：</b>把不同形状的乘客送到对应形状的车站（★ 为各市主枢纽）。车站候车超过容量并持续 45 秒即运营中断。</p>
+      <p><b className="text-[#f1dba0]">目标：</b>把不同形状的乘客送到对应形状的车站（★ 为各市主枢纽）。车站候车超过容量并持续 {BAL.overSecs} 秒即运营中断。</p>
       <p><b className="text-[#f1dba0]">建线：</b>点 ＋新线（或未选线路时）从车站拖到另一车站。选中线路后，拖端点站可延伸，拖到另一端点可成环线。</p>
       <p><b className="text-[#f1dba0]">改道：</b>点击线路选中，拖动线上的 ⊕ 把手并落在某车站上，该站会被插入线路；把中间站拖离 60px 以上可取消停靠。</p>
       <p><b className="text-[#f1dba0]">换乘枢纽：</b>两条及以上线路共站即为立体枢纽，各线站台分层、斜向交叉，容量 +4；乘客自动按最短路径换乘。</p>

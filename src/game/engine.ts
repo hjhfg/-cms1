@@ -466,6 +466,21 @@ export class Game {
     }
     this.netVersion++;
     this.pathVersion++;
+    this.pruneUnroutable();
+  }
+
+  // 线网变动后，把“接上来的车站里已经送不掉”的乘客请下车：
+  // 否则他们会永远上不了车，却一直占着站台把人堆到判负。
+  private pruneUnroutable() {
+    this.computeNet();
+    let dropped = 0;
+    for (const s of this.stations) {
+      if (!s.lineIds.length || !s.waiting.length) continue;
+      const keep = s.waiting.filter((p) => isFinite(this.dist.get(p.target)![s.id]));
+      dropped += s.waiting.length - keep.length;
+      s.waiting = keep;
+    }
+    if (dropped > 0) this.toast(`${dropped} 名乘客无法到达目的地，已改乘其他交通`, 'info');
   }
 
   private snapTrain(t: Train, l: Line) {
@@ -601,7 +616,14 @@ export class Game {
       if (s.waiting.length >= maxBacklog) continue;
       const rate = BAL.spawnBase * (s.tier === 3 ? 1.5 : s.tier === 2 ? 1.15 : 0.9) * m;
       if (Math.random() < rate * dt) {
-        const choices = SHAPE_LIST.filter((x) => shapesAvail.has(x) && x !== s.shape);
+        // 已接线的车站只生成“从本站真的送得到”的形状：某形状若只落在未接线的车站上，
+        // 发出去的乘客永远找不到路径、上不了车，会把车站白白堆到判负。
+        // 未接线的车站仍按全部形状发客（车站有人气、也给玩家选址提示），
+        // 它们接上线时会由 pruneUnroutable() 清掉送不掉的乘客。
+        const choices = SHAPE_LIST.filter(
+          (x) => shapesAvail.has(x) && x !== s.shape && (!s.lineIds.length || isFinite(this.dist.get(x)![s.id])),
+        );
+        if (!choices.length) continue;
         const weights = choices.map((x) => (x === 'star' ? 0.55 : 1));
         let r = Math.random() * weights.reduce((a, b) => a + b, 0);
         let target = choices[0];
@@ -731,7 +753,10 @@ export class Game {
       }
       const hop = this.nextHop(sid, p.target, l.id);
       if (hop && hop.to === nextSid && this.hopLines(sid, hop.to).includes(l.id)) stay.push(p);
-      else {
+      else if (!hop) {
+        // 本站已无路可达其目的地（线网被改动过），直接下车离站，不留在站台堆积
+        moved++;
+      } else {
         p.skipTrain = t.id;
         st.waiting.push(p);
         moved++;
