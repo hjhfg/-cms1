@@ -25,3 +25,6 @@ pnpm-debug.log*
 
 # TS 缓存
 *.tsbuildinfo
+
+# 临时测试脚本
+.smoke/
