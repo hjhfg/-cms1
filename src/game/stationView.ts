@@ -107,7 +107,7 @@ export class StationView {
       pathAt(line.path, s, this.samp);
       const yaw = Math.atan2(this.samp.tx, this.samp.tz);
       dirs.push(yaw);
-      const e = (hub ? (st.lineIds.indexOf(line.id) + 1) * 9 : 0) + 0.4;
+      const e = 8000 + (hub ? (st.lineIds.indexOf(line.id) + 1) * 6000 : 0);
       maxE = Math.max(maxE, e);
       const pg = new THREE.Group();
       pg.rotation.y = yaw;

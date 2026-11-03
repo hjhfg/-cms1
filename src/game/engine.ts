@@ -1,7 +1,7 @@
 import { LINE_COLORS, LINE_NAMES, type Shape, type StationDef } from '../data/regions';
 import { CITY_META } from '../data/cities';
 import { project, waterProfile, type WaterKind } from './geo';
-import { buildPath, type PathData } from './path';
+import { buildPath, VIADUCT_H, type PathData } from './path';
 import { generateStations, hashStr } from './stationGen';
 
 /** 开局城市：佛山 */
@@ -474,8 +474,8 @@ export class Game {
       }
       const elev = l.stations.map((sid) => {
         const st = this.stations[sid];
-        if (!st.hub) return 0.0004;
-        return 0.0004 + (st.lineIds.indexOf(l.id) + 1) * 0.009;
+        if (!st.hub) return VIADUCT_H;
+        return VIADUCT_H + (st.lineIds.indexOf(l.id) + 1) * 0.006;
       });
       const old = l.sig;
       const oldPath = l.path;

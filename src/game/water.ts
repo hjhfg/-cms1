@@ -4,7 +4,7 @@ import { PROJECTED_LAKES, PROJECTED_RIVERS, isLand, isWater, lakeAt, nearLand } 
 // 水面高度：略高于陆地顶面（陆地顶面 y=0），避免 z-fighting
 export const WATER_Y = 0.0012;
 // 堤岸顶（珠三角的“基围”：河床两侧抬起的堤）
-const BANK_Y = 0.0058;
+const BANK_Y = 0.0034;
 // 每条河/湖再抬升极小的高度，交叉处不会 z-fighting（差值远小于视觉精度）
 const LEVEL_EPS = 2e-6;
 const STEP = 0.7; // 中心线采样间距 km
@@ -94,6 +94,8 @@ function pushQuad(buf: GeoBuf, quad: Quad) {
 }
 
 const SHALLOW: [number, number, number] = [0.22, 0.52, 0.53];
+// 河面进入潮汐河道/河口时改用海面同色，避免深色水带压在海面上
+const BLEND: [number, number, number] = [0.075, 0.416, 0.56];
 const MID: [number, number, number] = [0.1, 0.33, 0.41];
 const DEEP: [number, number, number] = [0.05, 0.2, 0.29];
 
@@ -116,12 +118,16 @@ export function riverWater(line: P2[], width: number, y = WATER_Y): GeoBuf {
         q.c.push(cs[ki]);
         q.uv!.push([ki / 4, cum[di] / 7]);
       }
-      // 河口进入开阔海面 / 河道穿过湖面时不再画河面，交给海/湖，避免水面互相压盖；
-      // 但狭窄的潮汐河道（两侧都是陆地）要继续画，否则珠三角会断成虚线
+      // 河道穿过湖面时交给湖；进入开阔海面（离岸 > 6 km）时收住，避免深色水带压在海面上。
+      // 6 km 的阈值保证珠三角这种潮汐河道不会断成虚线
       const cx = (q.p[0][0] + q.p[3][0]) / 2;
       const cz = (q.p[0][2] + q.p[3][2]) / 2;
       if (lakeAt(cx, cz)) continue;
-      if (!isLand(cx, cz) && !nearLand(cx, cz, Math.max(1.8, width * 1.6))) continue;
+      if (!isLand(cx, cz)) {
+        if (!nearLand(cx, cz, 6)) continue;
+        // 水面之上：改成海面同色，跟海自然融合
+        for (let k = 0; k < 4; k++) q.c[k] = BLEND;
+      }
       pushQuad(buf, q);
     }
   }
@@ -147,8 +153,8 @@ export function riverBanks(line: P2[], width: number, y = WATER_Y, top = BANK_Y)
         // 内缘（水面边）→ 外缘（堤顶）
         const a0: [number, number, number] = [A[0] + nA[0] * half * side, y, A[1] + nA[1] * half * side];
         const b0: [number, number, number] = [B[0] + nB[0] * half * side, y, B[1] + nB[1] * half * side];
-        const a1: [number, number, number] = [A[0] + nA[0] * half * 1.55 * side, top, A[1] + nA[1] * half * 1.55 * side];
-        const b1: [number, number, number] = [B[0] + nB[0] * half * 1.55 * side, top, B[1] + nB[1] * half * 1.55 * side];
+        const a1: [number, number, number] = [A[0] + nA[0] * half * 1.3 * side, top, A[1] + nA[1] * half * 1.3 * side];
+        const b1: [number, number, number] = [B[0] + nB[0] * half * 1.3 * side, top, B[1] + nB[1] * half * 1.3 * side];
         // 外缘落在别的河道/海里就跳过，避免河堤压在水面上
         // 外缘落在开阔海面/湖面就跳过；狭窄潮汐河道两侧仍要画堤
         if ((isWater(a1[0], a1[2]) || isWater(b1[0], b1[2])) && !nearLand((a1[0] + b1[0]) / 2, (a1[2] + b1[2]) / 2, 2.2)) continue;

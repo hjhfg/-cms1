@@ -281,6 +281,89 @@ export function makeBallastTexture(): THREE.CanvasTexture {
   return t;
 }
 
+
+/** 高铁箱梁混凝土：预制节段拼缝 + 水渍 + 细骨料颗粒 */
+export function makeConcreteTexture(): THREE.CanvasTexture {
+  const w = 128;
+  const hgt = 128;
+  const cv = document.createElement('canvas');
+  cv.width = w;
+  cv.height = hgt;
+  const g = cv.getContext('2d')!;
+  g.fillStyle = '#b9b6ad';
+  g.fillRect(0, 0, w, hgt);
+  // 骨料颗粒
+  for (let i = 0; i < 5200; i++) {
+    const v = 150 + Math.random() * 70;
+    g.fillStyle = `rgba(${v},${v - 3},${v - 10},0.5)`;
+    g.fillRect(Math.random() * w, Math.random() * hgt, 1 + Math.random() * 1.6, 1);
+  }
+  // 水渍 / 雨痕
+  for (let i = 0; i < 26; i++) {
+    const x = Math.random() * w;
+    const grd = g.createLinearGradient(x, 0, x + 6, 0);
+    grd.addColorStop(0, 'rgba(120,120,112,0)');
+    grd.addColorStop(0.5, 'rgba(120,120,112,0.16)');
+    grd.addColorStop(1, 'rgba(120,120,112,0)');
+    g.fillStyle = grd;
+    g.fillRect(x, Math.random() * hgt * 0.5, 6, hgt * (0.3 + Math.random() * 0.6));
+  }
+  // 预制节段拼缝（横向）
+  g.strokeStyle = 'rgba(96,94,88,0.55)';
+  g.lineWidth = 2;
+  g.beginPath();
+  g.moveTo(0, 0.5);
+  g.lineTo(w, 0.5);
+  g.stroke();
+  // 纵向腹板分界
+  g.strokeStyle = 'rgba(104,102,96,0.35)';
+  g.lineWidth = 1.5;
+  for (const x of [0.22, 0.5, 0.78]) {
+    g.beginPath();
+    g.moveTo(x * w, 0);
+    g.lineTo(x * w, hgt);
+    g.stroke();
+  }
+  // 边缘排水槽阴影
+  const sh = g.createLinearGradient(0, 0, w, 0);
+  sh.addColorStop(0, 'rgba(60,60,56,0.35)');
+  sh.addColorStop(0.12, 'rgba(60,60,56,0)');
+  sh.addColorStop(0.88, 'rgba(60,60,56,0)');
+  sh.addColorStop(1, 'rgba(60,60,56,0.35)');
+  g.fillStyle = sh;
+  g.fillRect(0, 0, w, hgt);
+  const t = new THREE.CanvasTexture(cv);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.anisotropy = 8;
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
+/** 隔音屏 / 护栏板：竖向肋条 + 底部混凝土基座 */
+export function makeBarrierTexture(): THREE.CanvasTexture {
+  const w = 64;
+  const hgt = 64;
+  const cv = document.createElement('canvas');
+  cv.width = w;
+  cv.height = hgt;
+  const g = cv.getContext('2d')!;
+  g.fillStyle = '#dfe3e4';
+  g.fillRect(0, 0, w, hgt);
+  g.fillStyle = 'rgba(150,158,162,0.55)';
+  g.fillRect(0, hgt * 0.62, w, hgt * 0.38);
+  for (let k = 0; k < 4; k++) {
+    g.fillStyle = 'rgba(120,130,136,0.45)';
+    g.fillRect(k * 16 + 7, 0, 3, hgt * 0.62);
+  }
+  g.fillStyle = 'rgba(255,255,255,0.5)';
+  g.fillRect(0, hgt * 0.60, w, 2);
+  const t = new THREE.CanvasTexture(cv);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.anisotropy = 8;
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
 export function makeFacadeTextures(): { map: THREE.CanvasTexture; emissive: THREE.CanvasTexture } {
   const W = 128;
   const H = 256;

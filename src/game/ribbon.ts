@@ -178,3 +178,64 @@ export function buildSegmentRibbon(segs: [number, number, number, number][], y =
   if (g.boundingSphere) g.boundingSphere.radius += 50;
   return g;
 }
+
+/** 沿路径立起一道竖墙（桥梁腹板 / 护栏 / 隔音屏）：底部与顶部各一层顶点 */
+export function buildWallGeometry(
+  xs: ArrayLike<number>,
+  ys: ArrayLike<number>,
+  zs: ArrayLike<number>,
+  cum: ArrayLike<number>,
+  half: number,
+  side: 1 | -1,
+  hBottom: number,
+  hTop: number,
+  uvScale: number,
+  step = 1,
+): THREE.BufferGeometry {
+  const n = xs.length;
+  const idxs: number[] = [];
+  for (let i = 0; i < n; i += step) idxs.push(i);
+  if (idxs[idxs.length - 1] !== n - 1) idxs.push(n - 1);
+  const m = idxs.length;
+  const pos = new Float32Array(m * 2 * 3);
+  const uv = new Float32Array(m * 2 * 2);
+  const nor = new Float32Array(m * 2 * 3);
+  for (let k = 0; k < m; k++) {
+    const i = idxs[k];
+    const ip = idxs[Math.max(0, k - 1)];
+    const inx = idxs[Math.min(m - 1, k + 1)];
+    let dx = xs[inx] - xs[ip];
+    let dz = zs[inx] - zs[ip];
+    const l = Math.hypot(dx, dz) || 1;
+    dx /= l;
+    dz /= l;
+    const px = -dz * side;
+    const pz = dx * side;
+    for (let r = 0; r < 2; r++) {
+      const o = k * 2 + r;
+      pos[o * 3] = xs[i] + px * half;
+      pos[o * 3 + 1] = ys[i] + (r === 0 ? hBottom : hTop);
+      pos[o * 3 + 2] = zs[i] + pz * half;
+      uv[o * 2] = cum[i] * uvScale;
+      uv[o * 2 + 1] = r;
+      nor[o * 3] = px;
+      nor[o * 3 + 2] = pz;
+    }
+  }
+  const index: number[] = [];
+  for (let k = 0; k < m - 1; k++) {
+    const a = k * 2;
+    const b = k * 2 + 1;
+    const c = (k + 1) * 2;
+    const d = (k + 1) * 2 + 1;
+    index.push(a, c, b, b, c, d);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+  g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  g.setIndex(index);
+  g.computeBoundingSphere();
+  if (g.boundingSphere) g.boundingSphere.radius += 5;
+  return g;
+}

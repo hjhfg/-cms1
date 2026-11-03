@@ -5,8 +5,8 @@ import type { BridgeInfo, Game, Line, Station, Train } from './engine';
 import type { PathData } from './path';
 import { BOUNDS, REGIONS, isLand, isWater } from './geo';
 import { buildWater, toGeometry } from './water';
-import { buildRibbonGeometry, buildSegmentRibbon, makeRibbonUniforms, makeScreenRibbonMaterial, patchRibbonMaterial, type RibbonUniforms, type ScreenRibbonUniforms } from './ribbon';
-import { buildCarGeoms, makeBallastTexture, makeFacadeTextures, makeNoiseTexture, makeWaterNormal, type CarGeoms } from './models';
+import { buildRibbonGeometry, buildSegmentRibbon, buildWallGeometry, makeRibbonUniforms, makeScreenRibbonMaterial, patchRibbonMaterial, type RibbonUniforms, type ScreenRibbonUniforms } from './ribbon';
+import { buildCarGeoms, makeBallastTexture, makeBarrierTexture, makeConcreteTexture, makeFacadeTextures, makeNoiseTexture, makeWaterNormal, type CarGeoms } from './models';
 import { pathAt, type PathSample } from './path';
 import { makeStationMats, StationView, type StationMats } from './stationView';
 
@@ -103,7 +103,7 @@ export class World {
   stationMats: StationMats;
   stationGroup = new THREE.Group();
   ballastTex: THREE.CanvasTexture;
-  realMats: { ballast: THREE.MeshStandardMaterial; rail: THREE.MeshStandardMaterial; deck: THREE.MeshStandardMaterial };
+  realMats: { ballast: THREE.MeshStandardMaterial; rail: THREE.MeshStandardMaterial; deck: THREE.MeshStandardMaterial; girder: THREE.MeshStandardMaterial; barrier: THREE.MeshStandardMaterial };
   carMeshes: { kind: 'mid' | 'cab'; parts: THREE.InstancedMesh[]; stripe: THREE.InstancedMesh; cap: number }[] = [];
   carMats!: { paint: THREE.MeshPhysicalMaterial; glass: THREE.MeshPhysicalMaterial; dark: THREE.MeshStandardMaterial; stripe: THREE.MeshStandardMaterial; light: THREE.MeshStandardMaterial };
   fogColor = new THREE.Color();
@@ -256,10 +256,14 @@ export class World {
 
     // ---------- 材质（真实轨道） ----------
     this.ballastTex = makeBallastTexture();
+    const concTex = makeConcreteTexture();
+    const barTex = makeBarrierTexture();
     this.realMats = {
       ballast: new THREE.MeshStandardMaterial({ map: this.ballastTex, roughness: 1, metalness: 0, side: THREE.DoubleSide }),
       rail: new THREE.MeshStandardMaterial({ color: 0xc3c9cf, roughness: 0.28, metalness: 0.95, side: THREE.DoubleSide }),
-      deck: new THREE.MeshStandardMaterial({ color: 0x70737a, roughness: 0.9, side: THREE.DoubleSide }),
+      deck: new THREE.MeshStandardMaterial({ map: concTex, color: 0xd6d3ca, roughness: 0.88, metalness: 0.02, side: THREE.DoubleSide }),
+      girder: new THREE.MeshStandardMaterial({ map: concTex, color: 0xc3c0b6, roughness: 0.9, metalness: 0.02, side: THREE.DoubleSide }),
+      barrier: new THREE.MeshStandardMaterial({ map: barTex, color: 0xe8ecee, roughness: 0.55, metalness: 0.15, side: THREE.DoubleSide }),
     };
     this.ballastTex.repeat.set(1, 1);
 
@@ -712,39 +716,61 @@ export class World {
     lv.group.add(ribbon);
 
     const geo = geoFar;
-    const mk = (mat: THREE.Material, u: RibbonUniforms, shadow: boolean) => {
-      patchRibbonMaterial(mat, u);
-      const m = new THREE.Mesh(geo, mat);
+    const mkGeo = (g: THREE.BufferGeometry, mat: THREE.Material, shadow: boolean) => {
+      const m = new THREE.Mesh(g, mat);
       m.frustumCulled = false;
       m.receiveShadow = shadow;
+      m.castShadow = shadow;
       lv!.group.add(m);
       lv!.real.push(m);
       return m;
     };
-    mk(this.cloneMat(this.realMats.deck), makeRibbonUniforms(0.0036, 0, 0.0095, -0.0006), true);
-    mk(this.cloneMat(this.realMats.ballast), makeRibbonUniforms(0.0022, 0, 0.0095, 0), true);
-    mk(this.cloneMat(this.realMats.rail), makeRibbonUniforms(0.00016, -0.00072, 0.0095, 0.00022), false);
-    mk(this.cloneMat(this.realMats.rail), makeRibbonUniforms(0.00016, 0.00072, 0.0095, 0.00022), false);
+    const mk = (mat: THREE.Material, u: RibbonUniforms, shadow: boolean) => {
+      patchRibbonMaterial(mat, u);
+      return mkGeo(geo, mat, shadow);
+    };
 
-    // 桥墩
+    // —— 高架桥箱梁 ——
+    // 桥面顶板（有预制节段拼缝的混凝土）
+    mk(this.cloneMat(this.realMats.deck), makeRibbonUniforms(0.0046, 0, 0.009, 0), true);
+    // 箱梁两侧腹板（下翻 1.8 m），形成梁体厚度
+    for (const side of [1, -1] as const) {
+      const wall = buildWallGeometry(p.px, p.py, p.pz, p.cum, 0.0046, side, -0.0019, 0.0, 0.24, p.n > 1200 ? 2 : 1);
+      mkGeo(wall, this.cloneMat(this.realMats.girder), true);
+    }
+    // 护栏 / 隔音屏（高 1.25 m）
+    for (const side of [1, -1] as const) {
+      const wall = buildWallGeometry(p.px, p.py, p.pz, p.cum, 0.0042, side, 0.0, 0.00125, 0.24, p.n > 1200 ? 2 : 1);
+      mkGeo(wall, this.cloneMat(this.realMats.barrier), false);
+    }
+
+    // —— 轨道：道床 + 两根钢轨 ——
+    mk(this.cloneMat(this.realMats.ballast), makeRibbonUniforms(0.0026, 0, 0.009, 0.0002), true);
+    mk(this.cloneMat(this.realMats.rail), makeRibbonUniforms(0.00016, -0.00072, 0.009, 0.00042), false);
+    mk(this.cloneMat(this.realMats.rail), makeRibbonUniforms(0.00016, 0.00072, 0.009, 0.00042), false);
+
+    // —— 桥墩：整条线路都是高架，每 ~90 m 一根，跨水段交给桥梁模型 ——
+    const VIADUCT = 0.008;
+    const span = Math.max(0.09, p.length / 420);
     const piers: number[] = [];
     let acc = 0;
     for (let i = 0; i < p.n; i++) {
       if (i > 0) acc += p.cum[i] - p.cum[i - 1];
-      if (p.py[i] > 0.0035 && acc > 0.06) {
+      const overWater = p.py[i] > VIADUCT + 0.0035;
+      if (acc >= span) {
         acc = 0;
-        piers.push(i);
+        if (!overWater) piers.push(i);
       }
     }
     if (piers.length) {
       const im = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1), this.stationMats.concrete, piers.length);
       piers.forEach((i, k) => {
-        const h = p.py[i] - 0.0016;
+        const h = Math.max(0.0015, p.py[i] - 0.0019 - 0.0002);
         const dx = p.px[Math.min(p.n - 1, i + 1)] - p.px[Math.max(0, i - 1)];
         const dz = p.pz[Math.min(p.n - 1, i + 1)] - p.pz[Math.max(0, i - 1)];
         this.tmpQ.setFromAxisAngle(this.upAxis, Math.atan2(dx, dz));
-        this.tmpV.set(p.px[i] + 0, h / 2, p.pz[i]);
-        this.tmpS.set(0.004, h, 0.0025);
+        this.tmpV.set(p.px[i], h / 2 + 0.0002, p.pz[i]);
+        this.tmpS.set(0.0034, h, 0.0024);
         this.tmpM.compose(this.tmpV, this.tmpQ, this.tmpS);
         im.setMatrixAt(k, this.tmpM);
       });
@@ -789,7 +815,7 @@ export class World {
       lv.ribbonMat.opacity = Math.max(0.0, farOp);
       lv.ribbonMat.emissiveIntensity = sel ? 1.0 : 0.5 + this.night * 0.5;
       lv.ribbonMat.visible = farOp > 0.01;
-      const showReal = dist < 14;
+      const showReal = dist < 18;
       for (const m of lv.real) m.visible = showReal;
     }
   }

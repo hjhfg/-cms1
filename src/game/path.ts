@@ -24,7 +24,9 @@ export interface PathInput {
   arch?: PathArch[]; // 每段跨水桥拱（len = segs）
 }
 
-const GROUND = 0.0004;
+/** 全线高架：轨面高 8 米（1 单位 = 1 km） */
+export const VIADUCT_H = 0.008;
+const GROUND = VIADUCT_H;
 const ss = (t: number) => {
   t = Math.max(0, Math.min(1, t));
   return t * t * (3 - 2 * t);
