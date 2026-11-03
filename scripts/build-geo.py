@@ -158,6 +158,7 @@ def main():
 
                     idx.append({
                         'n': name,
+                        'c': cname,                     # 所属地级市（真实层级，非聚类）
                         'cp': [round(cp[0], 4), round(cp[1], 4)] if cp else None,
                         'p': npoly,
                         'o': before,

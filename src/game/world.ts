@@ -2,7 +2,8 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { CITIES } from '../data/regions';
 import type { Game, Line, Train } from './engine';
-import { REGIONS, isLand } from './geo';
+import { REGIONS, isLand, buildMask, type RegionGeo } from './geo';
+import { loadProvince, provincesInView, isLoaded, loadedProvinces, PROVINCES } from './geoLoader';
 import { buildRibbonGeometry, buildSegmentRibbon, makeRibbonUniforms, makeScreenRibbonMaterial, patchRibbonMaterial, type RibbonUniforms, type ScreenRibbonUniforms } from './ribbon';
 import { buildCarGeoms, makeBallastTexture, makeFacadeTextures, makeNoiseTexture, makeWaterNormal, type CarGeoms } from './models';
 import { pathAt, type PathSample } from './path';
@@ -12,6 +13,19 @@ export type MapMode = 'political' | 'heat' | 'terrain';
 export type Quality = 'low' | 'mid' | 'high';
 
 const COLOR_BY_ID = new Map(CITIES.map((c) => [c.id, c.color]));
+
+// 省级配色：按 ID 散列到稳定的色相，避免全国 34 省大量同色
+function provColor(id: string): string {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 100003;
+  const hue = (h * 137.508) % 360;
+  const sat = 34 + (h % 22);
+  const lig = 44 + (h % 14);
+  return `hsl(${hue} ${sat}% ${lig}%)`;
+}
+
+export const PROV_COLOR = new Map<string, string>();
+for (const p of PROVINCES) PROV_COLOR.set(p.id, provColor(p.id));
 
 function mulberry(seed: number) {
   let a = seed >>> 0;
@@ -37,30 +51,10 @@ export interface RegionInfo {
   size: number;
 }
 
+// 省级标签信息：基于骨架（区县中心点）计算，不需几何即可用
 export const REGION_INFO: RegionInfo[] = REGIONS.map((r) => {
-  let best: [number, number][] = [];
-  let bestA = 0;
-  for (const poly of r.polys) {
-    const ring = poly[0];
-    let a = 0;
-    for (let i = 0; i < ring.length; i++) {
-      const p = ring[i];
-      const q = ring[(i + 1) % ring.length];
-      a += p[0] * q[1] - q[0] * p[1];
-    }
-    if (Math.abs(a) > bestA) {
-      bestA = Math.abs(a);
-      best = ring;
-    }
-  }
-  let cx = 0;
-  let cz = 0;
-  for (const p of best) {
-    cx += p[0];
-    cz += p[1];
-  }
   const short = CITIES.find((c) => c.id === r.id)?.short ?? r.name;
-  return { id: r.id, name: r.name, short, x: cx / best.length, z: cz / best.length, size: Math.sqrt(bestA / 2) };
+  return { id: r.id, name: r.name, short, x: r.center[0], z: r.center[1], size: r.size };
 });
 
 class LineView {
@@ -89,6 +83,15 @@ export class World {
   seaMat: THREE.MeshPhysicalMaterial;
   waterNormal: THREE.CanvasTexture;
   regionMeshes = new Map<string, THREE.Mesh>();
+  landNoise: THREE.Texture | null = null;
+  // ---- 流式加载状态 ----
+  /** 正在加载的省份 */
+  loadingProvinces = new Set<string>();
+  /** 已构建几何的省份（与小面几何一一对应） */
+  builtProvinces = new Set<string>();
+  /** 上次触发加载的视野中心，用于节流 */
+  private landSyncKey = '';
+  landStats = { loaded: 0, built: 0, requests: 0, maskBuilding: false };
   regionMats = new Map<string, THREE.MeshStandardMaterial>();
   borderU: ScreenRibbonUniforms[] = [];
   coastU: ScreenRibbonUniforms[] = [];
@@ -183,71 +186,13 @@ export class World {
     this.seaMat.depthWrite = false;
     sc.add(this.sea);
 
-    // ---------- 陆地 ----------
-    const noise = makeNoiseTexture(256, 5, 0.7, 1.0);
-    noise.repeat.set(1 / 14, 1 / 14);
-    for (const r of REGIONS) {
-      const geos: THREE.BufferGeometry[] = [];
-      for (const poly of r.polys) {
-        const shape = new THREE.Shape(poly[0].map(([x, z]) => new THREE.Vector2(x, -z)));
-        for (let i = 1; i < poly.length; i++) shape.holes.push(new THREE.Path(poly[i].map(([x, z]) => new THREE.Vector2(x, -z))));
-        try {
-          const g = new THREE.ExtrudeGeometry(shape, { depth: 2, bevelEnabled: false, curveSegments: 1 });
-          g.rotateX(-Math.PI / 2);
-          g.translate(0, -2, 0);
-          geos.push(g);
-        } catch {
-          /* ignore degenerate */
-        }
-      }
-      if (!geos.length) continue;
-      const geo = geos.length === 1 ? geos[0] : mergeGeometries(geos, false)!;
-      const mat = new THREE.MeshStandardMaterial({ color: COLOR_BY_ID.get(r.id) ?? '#888', map: noise, roughness: 0.92, metalness: 0.0, bumpMap: noise, bumpScale: 0.6 });
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.receiveShadow = true;
-      mesh.userData.regionId = r.id;
-      sc.add(mesh);
-      this.regionMeshes.set(r.id, mesh);
-      this.regionMats.set(r.id, mat);
-    }
+    // ---------- 陆地（流式：由 syncLand() 按视野增量构建） ----------
+    this.landNoise = makeNoiseTexture(256, 5, 0.7, 1.0);
+    this.landNoise.repeat.set(1 / 14, 1 / 14);
+    this.syncLand(0, 0, 1e9);
 
-    // ---------- 边界 / 海岸线 ----------
-    {
-      const coast: [number, number, number, number][] = [];
-      const border: [number, number, number, number][] = [];
-      for (const r of REGIONS) {
-        for (const poly of r.polys) {
-          for (const ring of poly) {
-            for (let i = 0; i < ring.length; i++) {
-              const a = ring[i];
-              const b = ring[(i + 1) % ring.length];
-              const mx = (a[0] + b[0]) / 2;
-              const mz = (a[1] + b[1]) / 2;
-              let dx = b[0] - a[0];
-              let dz = b[1] - a[1];
-              const l = Math.hypot(dx, dz) || 1;
-              dx /= l;
-              dz /= l;
-              const s1 = isLand(mx - dz * 1.6, mz + dx * 1.6);
-              const s2 = isLand(mx + dz * 1.6, mz - dx * 1.6);
-              (s1 && s2 ? border : coast).push([a[0], a[1], b[0], b[1]]);
-            }
-          }
-        }
-      }
-      const addRibbon = (segs: [number, number, number, number][], color: number, w: number, op: number, order: number, store: ScreenRibbonUniforms[]) => {
-        const { mat, u } = makeScreenRibbonMaterial(color, w, op);
-        const m = new THREE.Mesh(buildSegmentRibbon(segs), mat);
-        m.renderOrder = order;
-        m.frustumCulled = false;
-        sc.add(m);
-        store.push(u);
-      };
-      addRibbon(coast, 0x57c2d4, 8, 0.16, 1, this.coastU);
-      addRibbon(coast, 0xcdeff2, 2.6, 0.4, 2, this.coastU);
-      addRibbon(coast, 0xf4efe0, 1.2, 0.8, 3, this.coastU);
-      addRibbon(border, 0x2d2417, 1.5, 0.65, 3, this.borderU);
-    }
+    // ---------- 边界 / 海岸线（几何就绪后由 rebuildBorders() 构建） ----------
+    this.rebuildBorders();
 
     // ---------- 材质（真实轨道） ----------
     this.ballastTex = makeBallastTexture();
@@ -559,6 +504,199 @@ export class World {
     }
   }
 
+  // ================= 边界 / 海岸线 =================
+  borderMeshes: THREE.Mesh[] = [];
+
+  /**
+   * 重建海岸线与省界线。
+   * 这两者必须依赖已加载的几何 + 陆地掩码，所以随流式加载重算。
+   * 判定方法：沿边线中点向两侧各偏移 1.6 km，都在陆地上 → 内陆省界；否则是海岸。
+   */
+  rebuildBorders() {
+    for (const m of this.borderMeshes) {
+      this.scene.remove(m);
+      m.geometry.dispose();
+      (m.material as THREE.Material).dispose();
+    }
+    this.borderMeshes.length = 0;
+    this.coastU.length = 0;
+    this.borderU.length = 0;
+
+    const coast: [number, number, number, number][] = [];
+    const border: [number, number, number, number][] = [];
+    for (const pg of loadedProvinces()) {
+      for (const c of pg.counties) {
+        for (const poly of c.polys) {
+          // 只取外环做边界（内环是飞地/湖泊，另行处理会过密）
+          const ring = poly[0];
+          if (!ring) continue;
+          for (let i = 0; i < ring.length; i++) {
+            const a = ring[i];
+            const b = ring[(i + 1) % ring.length];
+            const mx = (a[0] + b[0]) / 2;
+            const mz = (a[1] + b[1]) / 2;
+            let dx = b[0] - a[0];
+            let dz = b[1] - a[1];
+            const l = Math.hypot(dx, dz) || 1;
+            dx /= l;
+            dz /= l;
+            const s1 = isLand(mx - dz * 1.6, mz + dx * 1.6);
+            const s2 = isLand(mx + dz * 1.6, mz - dx * 1.6);
+            (s1 && s2 ? border : coast).push([a[0], a[1], b[0], b[1]]);
+          }
+        }
+      }
+    }
+
+    const addRibbon = (
+      segs: [number, number, number, number][], color: number, w: number, op: number,
+      order: number, store: ScreenRibbonUniforms[]
+    ) => {
+      if (!segs.length) return;
+      const { mat, u } = makeScreenRibbonMaterial(color, w, op);
+      const m = new THREE.Mesh(buildSegmentRibbon(segs), mat);
+      m.renderOrder = order;
+      m.frustumCulled = false;
+      this.scene.add(m);
+      this.borderMeshes.push(m);
+      store.push(u);
+    };
+    addRibbon(coast, 0x57c2d4, 8, 0.16, 1, this.coastU);
+    addRibbon(coast, 0xcdeff2, 2.6, 0.4, 2, this.coastU);
+    addRibbon(coast, 0xf4efe0, 1.2, 0.8, 3, this.coastU);
+    addRibbon(border, 0x2d2417, 1.5, 0.65, 3, this.borderU);
+  }
+
+  // ================= 陆地流式加载 =================
+  /**
+   * 按视野增量构建陆地。
+   * 思路同 CK3：地图不一次建完，只维持「当前视野 + 一圈缓冲」。
+   *   1. 算出视野覆盖哪些省（用中心点包围盒，O(34)）
+   *   2. 未加载的省发起 fetch（并发上限 3）
+   *   3. 加载完成的本帧内构建挤出几何
+   *   4. 远离视野的省卸载，释放显存
+   */
+  syncLand(tx: number, tz: number, dist: number) {
+    // 视野半径：随镜头距离变化，留 1.5 倍缓冲
+    const viewR = Math.max(900, dist * 2.2);
+    const key = Math.round(tx / 120) + ',' + Math.round(tz / 120) + ',' + Math.round(viewR / 240);
+    if (key === this.landSyncKey) return;
+    this.landSyncKey = key;
+
+    const want = provincesInView(tx - viewR, tz - viewR, tx + viewR, tz + viewR);
+    const wantSet = new Set(want);
+
+    // ---- 卸载远景省份 ----
+    for (const id of [...this.builtProvinces]) {
+      if (wantSet.has(id)) continue;
+      const mesh = this.regionMeshes.get(id);
+      if (mesh) {
+        this.scene.remove(mesh);
+        mesh.geometry.dispose();
+        this.regionMeshes.delete(id);
+      }
+      this.builtProvinces.delete(id);
+    }
+
+    // ---- 发起加载 ----
+    let inflight = this.loadingProvinces.size;
+    for (const id of want) {
+      if (isLoaded(id) || this.loadingProvinces.has(id) || inflight >= 3) continue;
+      this.loadingProvinces.add(id);
+      inflight++;
+      this.landStats.requests++;
+      loadProvince(id)
+        .then(() => {
+          this.loadingProvinces.delete(id);
+          this.buildProvinceLand(id);
+        })
+        .catch((e) => {
+          this.loadingProvinces.delete(id);
+          console.warn('[geo] 省级加载失败', id, e);
+        });
+    }
+
+    this.landStats.loaded = loadedProvinces().length;
+    this.landStats.built = this.builtProvinces.size;
+  }
+
+  /** 用一个省的区县几何挤出一个陆地网格 */
+  buildProvinceLand(id: string) {
+    if (this.builtProvinces.has(id)) return;
+    const pg = loadedProvinces().find((p) => p.id === id);
+    if (!pg) return;
+
+    const geos: THREE.BufferGeometry[] = [];
+    for (const c of pg.counties) {
+      for (const poly of c.polys) {
+        if (!poly.length) continue;
+        try {
+          const shape = new THREE.Shape(poly[0].map(([x, z]) => new THREE.Vector2(x, -z)));
+          for (let i = 1; i < poly.length; i++) {
+            shape.holes.push(new THREE.Path(poly[i].map(([x, z]) => new THREE.Vector2(x, -z))));
+          }
+          const g = new THREE.ExtrudeGeometry(shape, { depth: 2, bevelEnabled: false, curveSegments: 1 });
+          g.rotateX(-Math.PI / 2);
+          g.translate(0, -2, 0);
+          geos.push(g);
+        } catch {
+          /* 退化多边形忽略 */
+        }
+      }
+    }
+    if (!geos.length) return;
+
+    const geo = geos.length === 1 ? geos[0] : mergeGeometries(geos, false);
+    if (!geo) return;
+    if (geos.length > 1) for (const g of geos) g.dispose();
+
+    const color = COLOR_BY_ID.get(id) ?? PROV_COLOR.get(id) ?? '#888';
+    const mat = new THREE.MeshStandardMaterial({
+      color, map: this.landNoise, roughness: 0.92, metalness: 0.0,
+      bumpMap: this.landNoise, bumpScale: 0.6,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.receiveShadow = true;
+    mesh.userData.regionId = id;
+    this.scene.add(mesh);
+    this.regionMeshes.set(id, mesh);
+    this.regionMats.set(id, mat);
+    this.builtProvinces.add(id);
+
+    // 掩码需要全部几何，重建一次（节流）
+    this.scheduleMaskRebuild();
+  }
+
+  private maskTimer = 0;
+  private maskDirty = false;
+  scheduleMaskRebuild() {
+    this.maskDirty = true;
+  }
+
+  /** 掩码重建（只在几何有变化时，且限制频率） */
+  private rebuildMaskIfNeeded(dt: number) {
+    if (!this.maskDirty) return;
+    this.maskTimer -= dt;
+    if (this.maskTimer > 0) return;
+    this.maskTimer = 1.2;
+    this.maskDirty = false;
+    const built = [...this.builtProvinces]
+      .map((id) => REGIONS.find((r) => r.id === id))
+      .filter((r): r is RegionGeo => !!r);
+    // 用已加载的省几何构建掩码
+    const withGeo: RegionGeo[] = [];
+    for (const pg of loadedProvinces()) {
+      const polys = pg.counties.flatMap((c) => c.polys);
+      const r = built.find((b) => b.id === pg.id);
+      if (!r) continue;
+      withGeo.push({ ...r, polys });
+    }
+    if (withGeo.length) {
+      buildMask(withGeo);
+      this.rebuildBorders();
+    }
+  }
+
   // ================= 车站 LOD =================
   syncStations(tx: number, tz: number, dist: number) {
     const near = dist < 12;
@@ -730,6 +868,8 @@ export class World {
     }
 
     this.syncLines(selectedLine, pxWorld, dist);
+    this.syncLand(tx, tz, dist);
+    this.rebuildMaskIfNeeded(dt);
     this.syncStations(tx, tz, dist);
     this.updateTrains(dist);
   }
