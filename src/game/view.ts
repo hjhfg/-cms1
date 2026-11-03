@@ -5,7 +5,7 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { GTAOPass } from 'three/examples/jsm/postprocessing/GTAOPass.js';
 import type { Game, Line } from './engine';
-import { regionAt } from './geo';
+import { BOUNDS, regionAt } from './geo';
 import { makeIconAtlas, ICON, ICON_COLS } from './models';
 import { pathAt, type PathSample } from './path';
 import { World, REGION_INFO, type MapMode, type Quality } from './world';
@@ -27,7 +27,7 @@ type Drag =
 
 const FOV = 38;
 const MIN_DIST = 0.045;
-const MAX_DIST = 2800;
+const MAX_DIST = 4200;
 
 export function detectQuality(): Quality {
   const saved = localStorage.getItem('gd-metro-quality') as Quality | null;
@@ -183,12 +183,14 @@ export class GameView {
   }
 
   focusProvince() {
-    const aspect = this.W / this.H;
-    const d = Math.min(MAX_DIST, Math.max(900 / (0.69 * aspect), 720 / 0.69) * 0.95);
+    const aspect = Math.max(0.5, this.W / this.H);
+    const w = BOUNDS.maxX - BOUNDS.minX;
+    const h = BOUNDS.maxZ - BOUNDS.minZ;
+    const d = Math.min(MAX_DIST, Math.max(h / 0.69, w / (0.69 * aspect)) * 0.92);
     this.follow = null;
     this.pitch = 1.0;
     this.yaw = 0;
-    this.flyTo(-5, -12, d);
+    this.flyTo((BOUNDS.minX + BOUNDS.maxX) / 2, (BOUNDS.minZ + BOUNDS.maxZ) / 2, d);
   }
 
   flyTo(x: number, z: number, dist: number) {

@@ -10,11 +10,18 @@ export interface PathData {
   version: number;
 }
 
+export interface PathArch {
+  h: number; // 桥面拱高 km
+  t0: number; // 水面区间起点（段内 0..1）
+  t1: number;
+}
+
 export interface PathInput {
   pts: [number, number][]; // station x,z
   elev: number[]; // station track elevation (km)
   lanes: number[]; // lane value per segment (len = segs)
   loop: boolean;
+  arch?: PathArch[]; // 每段跨水桥拱（len = segs）
 }
 
 const GROUND = 0.0004;
@@ -26,7 +33,7 @@ const ss = (t: number) => {
 let VERSION = 1;
 
 export function buildPath(inp: PathInput): PathData {
-  const { pts, elev, lanes, loop } = inp;
+  const { pts, elev, lanes, loop, arch } = inp;
   const n = pts.length;
   const segs = loop ? n : n - 1;
   // tangents
@@ -78,7 +85,13 @@ export function buildPath(inp: PathInput): PathData {
       const dB = (1 - t) * len;
       const eA = elev[i];
       const eB = elev[j];
-      const y = GROUND + (eA - GROUND) * (1 - ss(dA / ramp)) + (eB - GROUND) * (1 - ss(dB / ramp));
+      let y = GROUND + (eA - GROUND) * (1 - ss(dA / ramp)) + (eB - GROUND) * (1 - ss(dB / ramp));
+      const ar = arch?.[i];
+      if (ar && ar.h > 0) {
+        const span = Math.max(0.04, ar.t1 - ar.t0);
+        const u = (t - ar.t0) / span;
+        if (u > 0 && u < 1) y += ar.h * Math.sin(Math.PI * u);
+      }
       xs.push(x);
       ys.push(y);
       zs.push(z);

@@ -1,8 +1,9 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { CITIES } from '../data/regions';
-import type { Game, Line, Train } from './engine';
-import { REGIONS, isLand } from './geo';
+import { CITY_META } from '../data/cities';
+import type { BridgeInfo, Game, Line, Station, Train } from './engine';
+import type { PathData } from './path';
+import { PROJECTED_RIVERS, REGIONS, isLand } from './geo';
 import { buildRibbonGeometry, buildSegmentRibbon, makeRibbonUniforms, makeScreenRibbonMaterial, patchRibbonMaterial, type RibbonUniforms, type ScreenRibbonUniforms } from './ribbon';
 import { buildCarGeoms, makeBallastTexture, makeFacadeTextures, makeNoiseTexture, makeWaterNormal, type CarGeoms } from './models';
 import { pathAt, type PathSample } from './path';
@@ -11,7 +12,7 @@ import { makeStationMats, StationView, type StationMats } from './stationView';
 export type MapMode = 'political' | 'heat' | 'terrain';
 export type Quality = 'low' | 'mid' | 'high';
 
-const COLOR_BY_ID = new Map(CITIES.map((c) => [c.id, c.color]));
+const COLOR_BY_ID = new Map(CITY_META.map((c) => [c.id, c.color]));
 
 function mulberry(seed: number) {
   let a = seed >>> 0;
@@ -59,7 +60,7 @@ export const REGION_INFO: RegionInfo[] = REGIONS.map((r) => {
     cx += p[0];
     cz += p[1];
   }
-  const short = CITIES.find((c) => c.id === r.id)?.short ?? r.name;
+  const short = CITY_META.find((c) => c.id === r.id)?.short ?? r.name;
   return { id: r.id, name: r.name, short, x: cx / best.length, z: cz / best.length, size: Math.sqrt(bestA / 2) };
 });
 
@@ -119,6 +120,8 @@ export class World {
   private upAxis = new THREE.Vector3(0, 1, 0);
   shadowSize = 1;
   time = 0;
+  private riverWaterMats: THREE.MeshPhysicalMaterial[] = [];
+  private builtStations = new Set<number>();
   curDist = 100;
   neutralLand = new THREE.Color(0x77805f);
 
@@ -266,18 +269,232 @@ export class World {
     this.buildingMat = new THREE.MeshStandardMaterial({
       map: fac.map, emissiveMap: fac.emissive, emissive: 0xffffff, emissiveIntensity: 0, roughness: 0.5, metalness: 0.2, envMapIntensity: 0.9,
     });
-    this.buildBuildings();
+    this.buildRivers();
+    this.buildBuildings(this.game.stations.filter((s) => s.revealed));
     this.buildLandmarks();
     sc.add(this.landmarks);
     this.buildTrains();
   }
 
+
+  // ================= 河流 / 江（3D 水面） =================
+  private static ribbonAlong(pts: [number, number][], halfW: number, y: number) {
+    const samples: [number, number][] = [];
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i];
+      const b = pts[i + 1];
+      const n = Math.max(2, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / 0.3));
+      for (let k = 0; k < n; k++) {
+        const t = k / n;
+        samples.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+      }
+    }
+    samples.push(pts[pts.length - 1]);
+    const pos: number[] = [];
+    const uv: number[] = [];
+    const idx: number[] = [];
+    let acc = 0;
+    for (let i = 0; i < samples.length; i++) {
+      const p = samples[i];
+      const pPrev = samples[Math.max(0, i - 1)];
+      const pNext = samples[Math.min(samples.length - 1, i + 1)];
+      let dx = pNext[0] - pPrev[0];
+      let dz = pNext[1] - pPrev[1];
+      const l = Math.hypot(dx, dz) || 1;
+      dx /= l;
+      dz /= l;
+      const nx = -dz * halfW;
+      const nz = dx * halfW;
+      if (i > 0) acc += Math.hypot(p[0] - samples[i - 1][0], p[1] - samples[i - 1][1]);
+      pos.push(p[0] + nx, y, p[1] + nz, p[0] - nx, y, p[1] - nz);
+      uv.push(acc / 0.55, 0, acc / 0.55, 1);
+      if (i > 0) {
+        const a0 = (i - 1) * 2;
+        idx.push(a0, a0 + 2, a0 + 1, a0 + 1, a0 + 2, a0 + 3);
+      }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+    g.setIndex(idx);
+    g.computeVertexNormals();
+    return g;
+  }
+
+  private buildRivers() {
+    const bankGeos: THREE.BufferGeometry[] = [];
+    const waterGeos: THREE.BufferGeometry[] = [];
+    const foamGeos: THREE.BufferGeometry[] = [];
+    for (const r of PROJECTED_RIVERS) {
+      const half = r.w / 2;
+      bankGeos.push(World.ribbonAlong(r.pts, half * 1.75, 0.0008));
+      waterGeos.push(World.ribbonAlong(r.pts, half, 0.0016));
+      foamGeos.push(World.ribbonAlong(r.pts, half * 0.92, 0.0024));
+    }
+    const bankMat = new THREE.MeshStandardMaterial({ color: 0x3d4632, roughness: 1, metalness: 0, side: THREE.DoubleSide });
+    const bank = new THREE.Mesh(mergeGeometries(bankGeos, false)!, bankMat);
+    bank.receiveShadow = true;
+    bank.renderOrder = 1;
+    this.scene.add(bank);
+
+    const tex = this.waterNormal.clone();
+    tex.needsUpdate = true;
+    tex.repeat.set(1, 1);
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    const waterMat = new THREE.MeshPhysicalMaterial({
+      color: 0x1d6a86,
+      roughness: 0.09,
+      metalness: 0.0,
+      normalMap: tex,
+      normalScale: new THREE.Vector2(0.7, 0.7),
+      envMapIntensity: 1.1,
+      clearcoat: 0.5,
+      clearcoatRoughness: 0.08,
+      side: THREE.DoubleSide,
+    });
+    const water = new THREE.Mesh(mergeGeometries(waterGeos, false)!, waterMat);
+    water.renderOrder = 2;
+    water.receiveShadow = false;
+    this.scene.add(water);
+    this.riverWaterMats.push(waterMat);
+
+    const foamMat = new THREE.MeshBasicMaterial({ color: 0xbfe6ef, transparent: true, opacity: 0.1, side: THREE.DoubleSide, depthWrite: false });
+    const foam = new THREE.Mesh(mergeGeometries(foamGeos, false)!, foamMat);
+    foam.renderOrder = 3;
+    this.scene.add(foam);
+  }
+
+  // ================= 桥梁 =================
+  private addBridge(group: THREE.Group, p: PathData, s0: number, s1: number, bi: BridgeInfo) {
+    const span = Math.max(0.05, s1 - s0);
+    const step = Math.max(0.04, span / 160);
+    const pts: { x: number; y: number; z: number; tx: number; tz: number }[] = [];
+    const out = { x: 0, y: 0, z: 0, tx: 0, tz: 1 };
+    for (let s = s0; s < s1; s += step) {
+      pathAt(p, s, out);
+      pts.push({ ...out });
+    }
+    pathAt(p, s1, out);
+    pts.push({ ...out });
+    if (pts.length < 2) return;
+
+    const sea = bi.kind === 'sea';
+    const jiang = bi.kind === 'jiang';
+    const halfW = sea ? 0.0075 : jiang ? 0.0062 : 0.0052;
+    const thick = sea ? 0.007 : 0.0045;
+    const lift = 0.0016;
+
+    // 箱梁：顶 / 底 / 两侧
+    const pos: number[] = [];
+    const idx: number[] = [];
+    for (let i = 0; i < pts.length; i++) {
+      const c = pts[i];
+      const nx = -c.tz * halfW;
+      const nz = c.tx * halfW;
+      const top = c.y - lift;
+      const bot = top - thick;
+      pos.push(c.x + nx, top, c.z + nz, c.x - nx, top, c.z - nz, c.x + nx, bot, c.z + nz, c.x - nx, bot, c.z - nz);
+      if (i > 0) {
+        const b = (i - 1) * 4;
+        idx.push(b, b + 1, b + 4, b + 1, b + 5, b + 4); // 顶
+        idx.push(b + 2, b + 6, b + 3, b + 3, b + 6, b + 7); // 底
+        idx.push(b, b + 4, b + 2, b + 2, b + 4, b + 6); // 左
+        idx.push(b + 1, b + 3, b + 5, b + 3, b + 7, b + 5); // 右
+      }
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setIndex(idx);
+    g.computeVertexNormals();
+    const deckMat = new THREE.MeshStandardMaterial({ color: sea ? 0xd9dde2 : 0xc9ccd0, roughness: 0.62, metalness: 0.12, side: THREE.DoubleSide });
+    const deck = new THREE.Mesh(g, deckMat);
+    deck.castShadow = true;
+    deck.receiveShadow = true;
+    group.add(deck);
+
+    // 桥墩
+    const piers: number[] = [];
+    let acc = 0;
+    for (let i = 0; i < pts.length; i++) {
+      if (i > 0) acc += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].z - pts[i - 1].z);
+      if (pts[i].y > 0.006 && acc > (sea ? 0.62 : 0.42)) {
+        acc = 0;
+        piers.push(i);
+      }
+    }
+    if (piers.length) {
+      const im = new THREE.InstancedMesh(new THREE.CylinderGeometry(1, 1.1, 1, 8), this.stationMats.concrete, piers.length);
+      piers.forEach((i, k) => {
+        const c = pts[i];
+        const h = Math.max(0.004, c.y - lift - thick - 0.0015);
+        this.tmpQ.setFromAxisAngle(this.upAxis, Math.atan2(c.tx, c.tz));
+        this.tmpV.set(c.x, h / 2, c.z);
+        this.tmpS.set(sea ? 0.0065 : 0.0045, h, sea ? 0.0045 : 0.0032);
+        this.tmpM.compose(this.tmpV, this.tmpQ, this.tmpS);
+        im.setMatrixAt(k, this.tmpM);
+      });
+      im.castShadow = true;
+      im.receiveShadow = true;
+      im.frustumCulled = false;
+      group.add(im);
+    }
+
+    // 跨江 / 跨海：斜拉桥塔 + 拉索
+    if (jiang || sea) {
+      const towerH = sea ? 0.12 : 0.065;
+      const towerMat = new THREE.MeshStandardMaterial({ color: 0xe6e9ec, roughness: 0.5, metalness: 0.2 });
+      const towerIdxs = [Math.floor(pts.length * 0.28), Math.floor(pts.length * 0.72)];
+      const cablePos: number[] = [];
+      for (const ti of towerIdxs) {
+        const c = pts[ti];
+        const nx = -c.tz;
+        const nz = c.tx;
+        const yaw = Math.atan2(c.tx, c.tz);
+        for (const side of [-1, 1]) {
+          const off = halfW + (sea ? 0.008 : 0.005) * side;
+          const bx = c.x + nx * off;
+          const bz = c.z + nz * off;
+          this.tmpQ.setFromAxisAngle(this.upAxis, yaw);
+          this.tmpV.set(bx, (c.y - lift + towerH) / 2, bz);
+          this.tmpS.set(sea ? 0.0032 : 0.0022, c.y - lift + towerH, sea ? 0.0026 : 0.0018);
+          this.tmpM.compose(this.tmpV, this.tmpQ, this.tmpS);
+          const tw = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), towerMat);
+          tw.applyMatrix4(this.tmpM);
+          tw.castShadow = true;
+          group.add(tw);
+          // 拉索
+          const topX = bx;
+          const topZ = bz;
+          const topY = c.y - lift + towerH;
+          for (let k = 1; k <= 4; k++) {
+            const a1 = ti - k * 6;
+            const a2 = ti + k * 6;
+            for (const ai of [a1, a2]) {
+              if (ai < 0 || ai >= pts.length) continue;
+              const q = pts[ai];
+              cablePos.push(topX, topY, topZ, q.x, q.y - lift, q.z);
+            }
+          }
+        }
+      }
+      if (cablePos.length) {
+        const cg = new THREE.BufferGeometry();
+        cg.setAttribute('position', new THREE.Float32BufferAttribute(cablePos, 3));
+        const cables = new THREE.LineSegments(cg, new THREE.LineBasicMaterial({ color: 0xdfe6ea, transparent: true, opacity: 0.75 }));
+        cables.frustumCulled = false;
+        group.add(cables);
+      }
+    }
+  }
+
   // ================= 建筑 =================
-  private buildBuildings() {
+  private buildBuildings(list: Station[]) {
     const density = this.quality === 'high' ? 1 : this.quality === 'mid' ? 0.6 : 0.35;
     const geo = new THREE.BoxGeometry(1, 1, 1);
     geo.translate(0, 0.5, 0);
-    for (const st of this.game.stations) {
+    for (const st of list) {
+      if (!st || this.builtStations.has(st.id)) continue;
+      this.builtStations.add(st.id);
       const rnd = mulberry(st.id * 7919 + 13);
       const R = st.tier === 3 ? 8 : st.tier === 2 ? 4.8 : 3;
       const cell = 0.27;
@@ -528,6 +745,15 @@ export class World {
       lv.group.add(im);
       lv.real.push(im as unknown as THREE.Mesh);
     }
+
+    // 跨水段：建桥（跨河 / 跨江 / 跨海）
+    for (const bi of line.bridges ?? []) {
+      const i = line.stations.indexOf(bi.a);
+      if (i < 0 || i + 1 >= p.stationS.length) continue;
+      const before = lv.group.children.length;
+      this.addBridge(lv.group, p, p.stationS[i], p.stationS[i + 1], bi);
+      for (const ch of lv.group.children.slice(before)) lv.real.push(ch as unknown as THREE.Mesh);
+    }
   }
 
   private cloneMat<T extends THREE.Material>(m: T): T {
@@ -688,6 +914,15 @@ export class World {
     (this.sun.shadow as unknown as { intensity: number }).intensity = 1 - smooth(5, 14, dist);
     this.sun.castShadow = this.quality !== 'low' && dist < 14 && this.daylight > 0.02;
 
+    // 河流水面流动
+    const fract = (v: number) => v - Math.floor(v);
+    for (const m of this.riverWaterMats) {
+      if (m.normalMap) {
+        m.normalMap.offset.set(fract(this.time * 0.011), fract(-this.time * 0.005));
+        m.normalScale.setScalar(0.35 + 0.5 * (1 - smooth(10, 120, dist)));
+      }
+    }
+
     // 海面
     const seaY = -Math.max(0.004, dist * 0.0009);
     this.sea.position.set(tx, seaY, tz);
@@ -727,6 +962,12 @@ export class World {
     if (this.time - this.lastRegionUpdate > (dist < 12 ? 0.15 : 0.5)) {
       this.lastRegionUpdate = this.time;
       this.updateRegionColors();
+    }
+
+    // 新揭示的车站补齐建筑（每帧最多 2 座，避免卡顿）
+    if (this.builtStations.size < g.stations.length) {
+      const pending = g.stations.filter((st) => st.revealed && !this.builtStations.has(st.id)).slice(0, 2);
+      if (pending.length) this.buildBuildings(pending);
     }
 
     this.syncLines(selectedLine, pxWorld, dist);

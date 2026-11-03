@@ -1,9 +1,13 @@
-import { CITIES, LINE_COLORS, LINE_NAMES, type Shape } from '../data/regions';
-import { project, seaKm } from './geo';
+import { LINE_COLORS, LINE_NAMES, type Shape, type StationDef } from '../data/regions';
+import { CITY_META } from '../data/cities';
+import { project, waterProfile, type WaterKind } from './geo';
 import { buildPath, type PathData } from './path';
+import { generateStations, hashStr } from './stationGen';
+
+/** 开局城市：佛山 */
+export const START_CITY = '440600';
 
 export const SHAPE_LIST: Shape[] = ['circle', 'triangle', 'square', 'diamond', 'pentagon', 'cross', 'star'];
-const BASE_SHAPES: Shape[] = ['circle', 'triangle', 'square', 'diamond', 'pentagon', 'cross'];
 
 export interface Passenger {
   id: number;
@@ -44,6 +48,18 @@ export interface Train {
   lastStation: number;
 }
 
+export type BridgeKind = 'river' | 'jiang' | 'sea';
+export interface BridgeInfo {
+  kind: BridgeKind;
+  name: string; // 跨河大桥 / 跨江大桥 / 跨海大桥
+  a: number; // 车站 id
+  b: number;
+  km: number;
+  t0: number; // 桥起点在线路参数上的比例
+  t1: number;
+}
+export const BRIDGE_NAME: Record<BridgeKind, string> = { river: '跨河大桥', jiang: '跨江大桥', sea: '跨海大桥' };
+
 export interface Line {
   id: number;
   slot: number;
@@ -54,6 +70,7 @@ export interface Line {
   path: PathData;
   invested: number;
   sig: string;
+  bridges: BridgeInfo[];
 }
 
 export interface CityState {
@@ -145,41 +162,41 @@ export class Game {
   private adj = new Map<number, { to: number; line: number; w: number }[]>();
   private dist = new Map<Shape, Float64Array>();
   private distStamp = -1;
-  private costCache = new Map<string, number>();
   private acc = 0;
   stationById = new Map<number, Station>();
 
-  constructor() {
-    let gi = 0;
-    for (const c of CITIES) {
-      const ids: number[] = [];
-      c.stations.forEach((d, k) => {
-        const [x, z] = project(d.lon, d.lat);
-        const shape = d.shape ?? BASE_SHAPES[(gi * 5 + 3) % 6];
-        const st: Station = {
-          id: gi, name: d.name, cityId: c.id, lon: d.lon, lat: d.lat, x, z, tier: d.tier, shape,
-          revealed: false, waiting: [], over: 0, lineIds: [], hub: false, order: k,
-        };
-        this.stations.push(st);
-        this.stationById.set(st.id, st);
-        ids.push(gi);
-        gi++;
-      });
-      let cost = 0;
-      const [hx, hz] = project(c.stations[0].lon, c.stations[0].lat);
-      const [gx, gz] = project(113.33, 23.12);
-      cost = Math.round((70 + Math.hypot(hx - gx, hz - gz) * 1.1) / 10) * 10;
-      this.cities.push({ id: c.id, name: c.name, short: c.short, color: c.color, unlocked: false, cost, stationIds: ids, delivered: 0 });
+  constructor(public seed = (Math.random() * 1e9) | 0) {
+    const [sx, sz] = project(CITY_META.find((c) => c.id === START_CITY)!.lon, CITY_META.find((c) => c.id === START_CITY)!.lat);
+    for (const c of CITY_META) {
+      const [cx, cz] = project(c.lon, c.lat);
+      const dist = Math.hypot(cx - sx, cz - sz);
+      const divs = Math.max(1, Math.round(Math.sqrt(c.area) / 25));
+      const cost = Math.max(60, Math.round((180 + 78 * Math.log2(1 + dist / 50) + divs * 6) / 10) * 10);
+      this.cities.push({ id: c.id, name: c.name, short: c.short, color: c.color, unlocked: false, cost, stationIds: [], delivered: 0 });
     }
-    for (const c of this.cities) {
-      const def = CITIES.find((d) => d.id === c.id)!;
-      if (def.startUnlocked) {
-        c.unlocked = true;
-        const n = c.id === '440100' ? 3 : 2;
-        for (let i = 0; i < n; i++) this.stations[c.stationIds[i]].revealed = true;
-      }
-    }
-    this.toast('欢迎来到粤港澳大湾区！从站点拖拽即可铺设地铁线路。', 'info');
+    const start = this.cities.find((c) => c.id === START_CITY)!;
+    start.unlocked = true;
+    this.addCityStations(START_CITY, 4);
+    this.toast('佛山地铁规划获批！从站点拖拽即可铺设线路，广州等城市需资金解锁。', 'info');
+  }
+
+  /** 为一座城市程序化生成车站（解锁时调用，保证每局都不一样） */
+  addCityStations(cityId: string, revealN = 3) {
+    const city = this.cities.find((c) => c.id === cityId);
+    if (!city) return;
+    const defs: StationDef[] = generateStations((this.seed ^ hashStr(cityId)) >>> 0, cityId);
+    defs.forEach((d, k) => {
+      const id = this.stations.length;
+      const [x, z] = project(d.lon, d.lat);
+      const st: Station = {
+        id, name: d.name, cityId, lon: d.lon, lat: d.lat, x, z, tier: d.tier,
+        shape: d.shape ?? 'circle', revealed: k < revealN, waiting: [], over: 0, lineIds: [], hub: false, order: k,
+      };
+      this.stations.push(st);
+      this.stationById.set(id, st);
+      city.stationIds.push(id);
+    });
+    this.netVersion++;
   }
 
   // ---------- 辅助 ----------
@@ -217,28 +234,32 @@ export class Game {
   linePassengers(l: Line) {
     return this.trains.filter((t) => t.line === l.id).reduce((a, t) => a + t.pax.length, 0);
   }
+  /** 单段造价：陆地按里程，跨河 / 跨江 / 跨海按不同桥型加价；盾构科技只折跨海 */
   segCost(a: number, b: number) {
-    const key = a < b ? `${a}-${b}` : `${b}-${a}`;
-    let c = this.costCache.get(key);
-    if (c === undefined) {
-      const A = this.stations[a];
-      const B = this.stations[b];
-      const len = Math.hypot(A.x - B.x, A.z - B.z);
-      const sea = seaKm(A.x, A.z, B.x, B.z);
-      c = (len - sea) * 0.85 + sea * 3.6;
-      this.costCache.set(key, c);
-    }
     const A = this.stations[a];
     const B = this.stations[b];
     const len = Math.hypot(A.x - B.x, A.z - B.z);
-    const base = c;
-    const seaPart = Math.max(0, base - len * 0.85) * (1 - this.techs.tbm * 0.3);
-    return Math.round(len * 0.85 + seaPart);
+    const w = waterProfile(A.x, A.z, B.x, B.z);
+    const land = Math.max(0, len - w.river - w.jiang - w.sea);
+    const seaRate = 4.2 * (1 - this.techs.tbm * 0.15);
+    return Math.round(land * 0.85 + w.river * 1.7 + w.jiang * 2.6 + w.sea * seaRate);
   }
+
+  /** 该段的跨水明细（桥型 / 里程 / 跨度），供造价、桥体渲染与 UI 使用 */
+  segWater(a: number, b: number): BridgeInfo | null {
+    const A = this.stations[a];
+    const B = this.stations[b];
+    const w = waterProfile(A.x, A.z, B.x, B.z);
+    const km = w.river + w.jiang + w.sea;
+    if (km < 0.35) return null;
+    const kind: BridgeKind = w.kind === 'none' ? 'river' : (w.kind as WaterKind as BridgeKind);
+    return { kind, name: BRIDGE_NAME[kind], a, b, km, t0: w.from, t1: w.to };
+  }
+
   seaOf(a: number, b: number) {
     const A = this.stations[a];
     const B = this.stations[b];
-    return seaKm(A.x, A.z, B.x, B.z);
+    return waterProfile(A.x, A.z, B.x, B.z).sea;
   }
   spend(amount: number): boolean {
     if (this.money < amount) {
@@ -266,12 +287,16 @@ export class Game {
     if (!this.spend(cost)) return null;
     const line: Line = {
       id: this.nextId++, slot, color: LINE_COLORS[slot], name: LINE_NAMES[slot], stations: [a, b], loop: false,
-      path: null as unknown as PathData, invested: cost, sig: '',
+      path: null as unknown as PathData, invested: cost, sig: '', bridges: [],
     };
     this.lines.push(line);
     this.rebuild();
     this.spawnTrain(line, true);
-    this.toast(`${line.name} 开通：${this.stations[a].name} — ${this.stations[b].name}`, 'good');
+    const br = this.segWater(a, b);
+    this.toast(
+      `${line.name} 开通：${this.stations[a].name} — ${this.stations[b].name}` + (br ? `（设${br.name} ${br.km.toFixed(0)}km）` : ''),
+      'good',
+    );
     return line;
   }
 
@@ -395,9 +420,10 @@ export class Game {
     if (!c || c.unlocked) return false;
     if (!this.spend(c.cost)) return false;
     c.unlocked = true;
-    for (let i = 0; i < Math.min(2, c.stationIds.length); i++) this.stations[c.stationIds[i]].revealed = true;
+    this.addCityStations(c.id, 3);
+    this.rebuild();
     this.netVersion++;
-    this.toast(`${c.short} 地铁规划获批，主枢纽已开放！`, 'good');
+    this.toast(`${c.short} 地铁规划获批，新站点开始出现！`, 'good');
     return true;
   }
 
@@ -453,7 +479,16 @@ export class Game {
       });
       const old = l.sig;
       const oldPath = l.path;
-      l.path = buildPath({ pts: l.stations.map((sid) => [this.stations[sid].x, this.stations[sid].z]), elev, lanes, loop: l.loop });
+      const bridges: BridgeInfo[] = [];
+      const arch = Array.from({ length: Math.max(1, segs) }, () => ({ h: 0, t0: 0, t1: 0 }));
+      for (let i = 0; i < segs; i++) {
+        const bi = this.segWater(l.stations[i], l.stations[(i + 1) % n]);
+        if (!bi) continue;
+        bridges.push(bi);
+        arch[i] = { h: bi.kind === 'sea' ? 0.05 : bi.kind === 'jiang' ? 0.028 : 0.014, t0: bi.t0, t1: bi.t1 };
+      }
+      l.bridges = bridges;
+      l.path = buildPath({ pts: l.stations.map((sid) => [this.stations[sid].x, this.stations[sid].z]), elev, lanes, loop: l.loop, arch });
       const sig = l.stations.join(',') + (l.loop ? 'L' : '');
       l.sig = sig;
       if (old !== sig) {
