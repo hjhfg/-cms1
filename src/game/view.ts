@@ -27,7 +27,7 @@ type Drag =
 
 const FOV = 38;
 const MIN_DIST = 0.045;
-const MAX_DIST = 2800;
+const MAX_DIST = 7600;   // 需覆盖全国约 4800 km 视野高度（dist 7000 时约 4821 km）
 
 export function detectQuality(): Quality {
   const saved = localStorage.getItem('gd-metro-quality') as Quality | null;
@@ -38,7 +38,7 @@ export function detectQuality(): Quality {
 
 export class GameView {
   renderer: THREE.WebGLRenderer;
-  camera = new THREE.PerspectiveCamera(FOV, 1, 0.01, 1000);
+  camera = new THREE.PerspectiveCamera(FOV, 1, 0.01, 60000);
   world: World;
   composer: EffectComposer | null = null;
   gtao: GTAOPass | null = null;
@@ -183,12 +183,14 @@ export class GameView {
   }
 
   focusProvince() {
+    // 全国视野：中国 + 越南北部，约 5000 × 4800 km
     const aspect = this.W / this.H;
-    const d = Math.min(MAX_DIST, Math.max(900 / (0.69 * aspect), 720 / 0.69) * 0.95);
+    const d = Math.min(MAX_DIST, Math.max(5200 / (0.69 * aspect), 4600 / 0.69) * 0.95);
     this.follow = null;
     this.pitch = 1.0;
     this.yaw = 0;
-    this.flyTo(-5, -12, d);
+    // 投影原点即全国几何中心，直接对准原点
+    this.flyTo(0, 0, d);
   }
 
   flyTo(x: number, z: number, dist: number) {

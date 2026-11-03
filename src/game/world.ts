@@ -128,7 +128,8 @@ export class World {
   constructor(public game: Game, public quality: Quality, renderer: THREE.WebGLRenderer) {
     const sc = this.scene;
     sc.background = new THREE.Color(0xaec7de);
-    sc.fog = new THREE.Fog(0xaec7de, 10, 1000);
+    // 雾只用于极远处收边；近端必须远于观察目标，否则全国视野下整图会蒙一层灰白
+    sc.fog = new THREE.Fog(0xaec7de, 3000, 28000);
 
     // 环境光照（程序化天空 → PMREM，用于 PBR 反射）
     {
@@ -179,7 +180,7 @@ export class World {
       color: 0x14506b, roughness: 0.16, metalness: 0.0, normalMap: this.waterNormal, normalScale: new THREE.Vector2(0.55, 0.55),
       envMapIntensity: 0.55, clearcoat: 0.25, clearcoatRoughness: 0.2,
     });
-    this.sea = new THREE.Mesh(new THREE.PlaneGeometry(9000, 9000), this.seaMat);
+    this.sea = new THREE.Mesh(new THREE.PlaneGeometry(26000, 26000), this.seaMat);
     this.sea.rotation.x = -Math.PI / 2;
     this.sea.receiveShadow = true;
     this.sea.renderOrder = -10;
@@ -807,8 +808,8 @@ export class World {
     (this.scene.background as THREE.Color).copy(fc);
     const fog = this.scene.fog as THREE.Fog;
     fog.color.copy(fc);
-    fog.near = dist * 1.2;
-    fog.far = dist * 11;
+    fog.near = dist * 2.4 + 900;
+    fog.far = dist * 4.0 + 16000;
 
     // 阴影跟随
     const size = Math.max(0.1, Math.min(6, dist * 0.8));
